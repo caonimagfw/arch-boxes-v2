@@ -18,5 +18,14 @@ function pre() {
 }
 
 function post() {
-  mv "${1}" "${2}"
+  local raw_image tar_image
+  raw_image="${2}"
+  tar_image="${2%.raw}.tar"
+
+  mv "${1}" "${raw_image}"
+  zstd -T0 -19 --rm "${raw_image}" -o "${raw_image}.zst"
+  zstd -d --stdout "${raw_image}.zst" > "${raw_image}"
+
+  tar -cf "${tar_image}" "$(basename "${raw_image}")"
+  zstd -T0 -19 --rm "${tar_image}" -o "${tar_image}.zst"
 }

@@ -52,6 +52,25 @@ systemctl enable systemd-time-wait-sync
 systemctl enable pacman-init.service
 EOF
 
+  # Default access policy for cloud builds: keep root and allow password login.
+  echo "root:A2vL5Y1hZ9" | arch-chroot "${MOUNT}" /usr/bin/chpasswd
+  arch-chroot "${MOUNT}" /usr/bin/chage -I -1 -m 0 -M 99999 -E -1 root
+
+  mkdir -p "${MOUNT}/etc/ssh/sshd_config.d"
+  cat <<EOF >"${MOUNT}/etc/ssh/sshd_config.d/10-password-login.conf"
+PasswordAuthentication yes
+KbdInteractiveAuthentication yes
+PermitRootLogin yes
+EOF
+
+  mkdir -p "${MOUNT}/etc/cloud/cloud.cfg.d"
+  cat <<EOF >"${MOUNT}/etc/cloud/cloud.cfg.d/99-enable-password-login.cfg"
+disable_root: false
+ssh_pwauth: true
+chpasswd:
+  expire: false
+EOF
+
   # GRUB
   arch-chroot "${MOUNT}" /usr/bin/grub-install --target=i386-pc "${LOOPDEV}"
   arch-chroot "${MOUNT}" /usr/bin/grub-install --target=x86_64-efi --efi-directory=/efi --removable

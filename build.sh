@@ -145,11 +145,30 @@ function unmount_image() {
 
 # Compute SHA256, adjust owner to $SUDO_UID:$SUDO_UID and move to output/
 function mv_to_output() {
+  local artifact tar_zst
+  local -a artifacts
+
+  artifacts=("${1}")
   sha256sum "${1}" >"${1}.SHA256"
-  if [ -n "${SUDO_UID:-}" ]; then
-    chown "${SUDO_UID}:${SUDO_GID}" "${1}"{,.SHA256}
+  artifacts+=("${1}.SHA256")
+
+  if [ -f "${1}.zst" ]; then
+    sha256sum "${1}.zst" >"${1}.zst.SHA256"
+    artifacts+=("${1}.zst" "${1}.zst.SHA256")
   fi
-  mv "${1}"{,.SHA256} "${OUTPUT}/"
+
+  tar_zst="${1%.raw}.tar.zst"
+  if [ -f "${tar_zst}" ]; then
+    sha256sum "${tar_zst}" >"${tar_zst}.SHA256"
+    artifacts+=("${tar_zst}" "${tar_zst}.SHA256")
+  fi
+
+  if [ -n "${SUDO_UID:-}" ]; then
+    chown "${SUDO_UID}:${SUDO_GID}" "${artifacts[@]}"
+  fi
+  for artifact in "${artifacts[@]}"; do
+    mv "${artifact}" "${OUTPUT}/"
+  done
 }
 
 # Helper function: create a new image from the "base" image
@@ -191,6 +210,12 @@ function main() {
     echo "root is required"
     exit 1
   fi
+
+  if ! command -v tar >/dev/null 2>&1 || ! command -v zstd >/dev/null 2>&1; then
+    echo "Required tools missing: tar and zstd must be installed on the build host."
+    exit 1
+  fi
+
   init
 
   setup_disk

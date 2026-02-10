@@ -6,6 +6,7 @@ on:
       version:
         description: "Build version (e.g. 6.18.7 or 20260211.1)"
         required: true
+        default: "6.18.7"
         type: string
       overwrite_release:
         description: "If release tag exists, delete and recreate it"
@@ -26,7 +27,7 @@ jobs:
     timeout-minutes: 300
     env:
       IMAGE_FILTER: cloud-image.sh
-      MAX_RELEASE_ASSET_BYTES: "1900000000"
+      MAX_RELEASE_ASSET_BYTES: "2200000000"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -70,6 +71,7 @@ jobs:
           sudo docker run --rm --privileged \
             -v /dev:/dev \
             -v /run/udev:/run/udev:ro \
+            -e "IMAGE_FILTER=${IMAGE_FILTER}" \
             -v "${PWD}:/workspace" \
             -w /workspace \
             archlinux:latest \
@@ -81,7 +83,8 @@ jobs:
                 dosfstools \
                 gptfdisk \
                 jq \
-                qemu-img
+                qemu-img \
+                zstd
               chmod +x ./build.sh ./images/*.sh
               ./build.sh "${{ github.event.inputs.version }}"
             '
@@ -95,30 +98,38 @@ jobs:
         run: |
           set -euo pipefail
           ls -lah output
-          raw_file="$(ls output/*cloudimg*.raw)"
-          sha_file="${raw_file}.SHA256"
-          [ -f "${sha_file}" ]
-          raw_size="$(stat -c '%s' "${raw_file}")"
-          echo "Raw size bytes: ${raw_size}"
-          echo "Raw size human: $(numfmt --to=iec "${raw_size}")"
-          if [ "${raw_size}" -gt "${MAX_RELEASE_ASSET_BYTES}" ]; then
-            echo "Raw image is too large for guarded release threshold (${MAX_RELEASE_ASSET_BYTES} bytes)."
-            echo "Reduce image size or raise MAX_RELEASE_ASSET_BYTES if your repo policy allows."
-            exit 1
-          fi
+          raw_zst_file="$(ls output/*cloudimg*.raw.zst)"
+          tar_zst_file="$(ls output/*cloudimg*.tar.zst)"
+
+          sha256sum "${raw_zst_file}" > "${raw_zst_file}.SHA256"
+          sha256sum "${tar_zst_file}" > "${tar_zst_file}.SHA256"
+
+          for artifact in "${raw_zst_file}" "${tar_zst_file}"; do
+            artifact_size="$(stat -c '%s' "${artifact}")"
+            echo "Artifact: ${artifact}"
+            echo "Size bytes: ${artifact_size}"
+            echo "Size human: $(numfmt --to=iec "${artifact_size}")"
+            if [ "${artifact_size}" -gt "${MAX_RELEASE_ASSET_BYTES}" ]; then
+              echo "Artifact ${artifact} is too large for guarded release threshold (${MAX_RELEASE_ASSET_BYTES} bytes)."
+              echo "Reduce image size or raise MAX_RELEASE_ASSET_BYTES if your repo policy allows."
+              exit 1
+            fi
+          done
 
       - name: Print SHA256 for release audit
         run: |
           set -euo pipefail
-          sha256sum output/*cloudimg*.raw
+          sha256sum output/*cloudimg*.raw.zst output/*cloudimg*.tar.zst
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ github.event.inputs.version }}
-          name: Arch Linux CloudCone Raw v${{ github.event.inputs.version }}
+          name: Arch Linux CloudCone Raw/Tar Zst v${{ github.event.inputs.version }}
           generate_release_notes: true
           files: |
-            output/*cloudimg*.raw
-            output/*cloudimg*.raw.SHA256
+            output/*cloudimg*.raw.zst
+            output/*cloudimg*.raw.zst.SHA256
+            output/*cloudimg*.tar.zst
+            output/*cloudimg*.tar.zst.SHA256
           fail_on_unmatched_files: true
