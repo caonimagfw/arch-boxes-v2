@@ -106,9 +106,21 @@ function image_cleanup() {
 # Helper function: wait until a given loop device has settled
 # ${1} - loop device
 function wait_until_settled() {
+  local tries=0
+  local max_tries=60
   udevadm settle
   blockdev --flushbufs --rereadpt "${1}"
   until test -e "${1}p3"; do
+    tries=$((tries + 1))
+    if [ "${tries}" -ge "${max_tries}" ]; then
+      echo "Timed out waiting for ${1}p3 to appear."
+      echo "The runtime likely does not expose loop partition nodes."
+      lsblk --output NAME,TYPE,SIZE "${1}" || true
+      exit 1
+    fi
+    partprobe "${1}" || true
+    partx -u "${1}" || true
+    udevadm settle || true
     echo "${1}p3 doesn't exist yet..."
     sleep 1
   done

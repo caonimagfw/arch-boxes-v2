@@ -37,6 +37,8 @@ jobs:
           docker --version
           sudo docker info >/dev/null
           sudo docker run --rm --privileged \
+            -v /dev:/dev \
+            -v /run/udev:/run/udev:ro \
             --entrypoint bash \
             archlinux:latest \
             -lc '
@@ -66,6 +68,8 @@ jobs:
         run: |
           set -euo pipefail
           sudo docker run --rm --privileged \
+            -v /dev:/dev \
+            -v /run/udev:/run/udev:ro \
             -v "${PWD}:/workspace" \
             -w /workspace \
             archlinux:latest \
