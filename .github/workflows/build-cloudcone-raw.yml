@@ -78,6 +78,7 @@ jobs:
                 gptfdisk \
                 jq \
                 qemu-img
+              chmod +x ./build.sh ./images/*.sh
               ./build.sh "${{ github.event.inputs.version }}"
             '
 
