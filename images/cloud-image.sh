@@ -1,0 +1,22 @@
+#!/bin/bash
+# shellcheck disable=SC2034,SC2154
+IMAGE_NAME="Arch-Linux-x86_64-cloudimg-${build_version}.raw"
+DISK_SIZE=""
+# The following modules require additional packages:
+# - growpart[1] requires the cloud-guest-utils package
+# - disk setup[2] requires the sgdisk package
+# [1] https://cloudinit.readthedocs.io/en/latest/reference/modules.html#growpart
+# [2] https://cloudinit.readthedocs.io/en/latest/reference/modules.html#disk-setup
+PACKAGES=(cloud-init cloud-guest-utils gptfdisk)
+SERVICES=(cloud-init-main.service cloud-init-local.service cloud-init-network.service cloud-config.service cloud-final.service)
+
+function pre() {
+  sed -Ei 's/^(GRUB_CMDLINE_LINUX_DEFAULT=.*)"$/\1 console=tty0 console=ttyS0,115200"/' "${MOUNT}/etc/default/grub"
+  echo 'GRUB_TERMINAL="serial console"' >>"${MOUNT}/etc/default/grub"
+  echo 'GRUB_SERIAL_COMMAND="serial --speed=115200"' >>"${MOUNT}/etc/default/grub"
+  arch-chroot "${MOUNT}" /usr/bin/grub-mkconfig -o /boot/grub/grub.cfg
+}
+
+function post() {
+  mv "${1}" "${2}"
+}

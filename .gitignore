@@ -1,0 +1,10 @@
+packer_cache/
+*.swp
+output-*
+.vscode
+*.SHA256
+*.qcow2
+/tmp/
+/output/
+# SpecStory explanation file
+.specstory/.what-is-this.md

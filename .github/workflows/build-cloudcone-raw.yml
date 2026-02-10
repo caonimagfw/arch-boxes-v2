@@ -1,0 +1,119 @@
+name: Build CloudCone Arch Raw
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Build version (e.g. 6.18.7 or 20260211.1)"
+        required: true
+        type: string
+      overwrite_release:
+        description: "If release tag exists, delete and recreate it"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cloudcone-raw-${{ github.event.inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      IMAGE_FILTER: cloud-image.sh
+      MAX_RELEASE_ASSET_BYTES: "1900000000"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Preflight checks (host + privileged container)
+        run: |
+          set -euo pipefail
+          docker --version
+          sudo docker info >/dev/null
+          sudo docker run --rm --privileged \
+            --entrypoint bash \
+            archlinux:latest \
+            -lc '
+              set -euo pipefail
+              pacman -Sy --noconfirm --needed btrfs-progs util-linux >/dev/null
+              command -v losetup mount mkfs.btrfs
+            '
+
+      - name: Validate or cleanup release tag state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: v${{ github.event.inputs.version }}
+          OVERWRITE: ${{ github.event.inputs.overwrite_release }}
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG}" --repo "${REPO}" >/dev/null 2>&1; then
+            if [ "${OVERWRITE}" != "true" ]; then
+              echo "Release tag ${TAG} already exists."
+              echo "Use a new version, or rerun with overwrite_release=true."
+              exit 1
+            fi
+            gh release delete "${TAG}" --repo "${REPO}" --cleanup-tag --yes
+          fi
+
+      - name: Build cloud-image raw in privileged Arch container
+        run: |
+          set -euo pipefail
+          sudo docker run --rm --privileged \
+            -v "${PWD}:/workspace" \
+            -w /workspace \
+            archlinux:latest \
+            bash -lc '
+              set -euo pipefail
+              pacman -Syu --noconfirm \
+                arch-install-scripts \
+                btrfs-progs \
+                dosfstools \
+                gptfdisk \
+                jq \
+                qemu-img
+              ./build.sh "${{ github.event.inputs.version }}"
+            '
+
+      - name: Fix output ownership
+        run: |
+          set -euo pipefail
+          sudo chown -R "$(id -u):$(id -g)" output
+
+      - name: Verify artifacts and enforce release size guard
+        run: |
+          set -euo pipefail
+          ls -lah output
+          raw_file="$(ls output/*cloudimg*.raw)"
+          sha_file="${raw_file}.SHA256"
+          [ -f "${sha_file}" ]
+          raw_size="$(stat -c '%s' "${raw_file}")"
+          echo "Raw size bytes: ${raw_size}"
+          echo "Raw size human: $(numfmt --to=iec "${raw_size}")"
+          if [ "${raw_size}" -gt "${MAX_RELEASE_ASSET_BYTES}" ]; then
+            echo "Raw image is too large for guarded release threshold (${MAX_RELEASE_ASSET_BYTES} bytes)."
+            echo "Reduce image size or raise MAX_RELEASE_ASSET_BYTES if your repo policy allows."
+            exit 1
+          fi
+
+      - name: Print SHA256 for release audit
+        run: |
+          set -euo pipefail
+          sha256sum output/*cloudimg*.raw
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.event.inputs.version }}
+          name: Arch Linux CloudCone Raw v${{ github.event.inputs.version }}
+          generate_release_notes: true
+          files: |
+            output/*cloudimg*.raw
+            output/*cloudimg*.raw.SHA256
+          fail_on_unmatched_files: true
