@@ -2,12 +2,9 @@
 # shellcheck disable=SC2034,SC2154
 IMAGE_NAME="Arch-Linux-x86_64-cloudimg-${build_version}.raw"
 DISK_SIZE=""
-# The following modules require additional packages:
-# - growpart[1] requires the cloud-guest-utils package
-# - disk setup[2] requires the sgdisk package
+# The growpart module requires cloud-guest-utils.
 # [1] https://cloudinit.readthedocs.io/en/latest/reference/modules.html#growpart
-# [2] https://cloudinit.readthedocs.io/en/latest/reference/modules.html#disk-setup
-PACKAGES=(cloud-init cloud-guest-utils gptfdisk)
+PACKAGES=(cloud-init cloud-guest-utils)
 SERVICES=(cloud-init-main.service cloud-init-local.service cloud-init-network.service cloud-config.service cloud-final.service)
 
 function pre() {

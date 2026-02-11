@@ -80,10 +80,9 @@ jobs:
               pacman -Syu --noconfirm \
                 arch-install-scripts \
                 btrfs-progs \
-                dosfstools \
-                gptfdisk \
                 jq \
                 qemu-img \
+                util-linux \
                 zstd
               chmod +x ./build.sh ./images/*.sh
               ./build.sh "${{ github.event.inputs.version }}"

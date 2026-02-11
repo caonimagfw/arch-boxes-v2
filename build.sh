@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build virtual machine images (basic image, cloud image etc.)
+# Build virtual machine images (cloud-image focused)
 
 # nounset: "Treat unset variables and parameters [...] as an error when performing parameter expansion."
 # errexit: "Exit immediately if [...] command exits with a non-zero status."
@@ -46,20 +46,14 @@ trap cleanup EXIT
 # Create the disk, partitions it, format the partition and mount the filesystem
 function setup_disk() {
   truncate -s "${DEFAULT_DISK_SIZE}" "${IMAGE}"
-  sgdisk --align-end \
-    --clear \
-    --new 0:0:+1M --typecode=0:ef02 --change-name=0:'BIOS boot partition' \
-    --new 0:0:+300M --typecode=0:ef00 --change-name=0:'EFI system partition' \
-    --new 0:0:0 --typecode=0:8304 --change-name=0:'Arch Linux root' \
-    "${IMAGE}"
+  # CloudCone compatibility: use BIOS + MBR with a single bootable root partition.
+  echo ',,L,*' | sfdisk "${IMAGE}"
 
   LOOPDEV=$(losetup --find --partscan --show "${IMAGE}")
   # Partscan is racy
   wait_until_settled "${LOOPDEV}"
-  mkfs.fat -F 32 -S 4096 "${LOOPDEV}p2"
-  mkfs.btrfs "${LOOPDEV}p3"
-  mount -o compress=zstd:1 "${LOOPDEV}p3" "${MOUNT}"
-  mount --mkdir "${LOOPDEV}p2" "${MOUNT}/efi"
+  mkfs.btrfs "${LOOPDEV}p1"
+  mount -o compress=zstd:1 "${LOOPDEV}p1" "${MOUNT}"
 }
 
 # Install Arch Linux to the filesystem (bootstrap)
@@ -78,7 +72,7 @@ EOF
   echo "Server = ${MIRROR}" >mirrorlist
 
   # We use the hosts package cache
-  pacstrap -c -C pacman.conf -K -M "${MOUNT}" base linux grub openssh sudo btrfs-progs dosfstools efibootmgr qemu-guest-agent
+  pacstrap -c -C pacman.conf -K -M "${MOUNT}" base linux grub openssh sudo btrfs-progs qemu-guest-agent
   # Workaround for https://gitlab.archlinux.org/archlinux/arch-install-scripts/-/issues/56
   gpgconf --homedir "${MOUNT}/etc/pacman.d/gnupg" --kill gpg-agent
   cp mirrorlist "${MOUNT}/etc/pacman.d/"
@@ -100,7 +94,6 @@ function image_cleanup() {
 
   sync -f "${MOUNT}/etc/os-release"
   fstrim --verbose "${MOUNT}"
-  fstrim --verbose "${MOUNT}/efi"
 }
 
 # Helper function: wait until a given loop device has settled
@@ -110,10 +103,10 @@ function wait_until_settled() {
   local max_tries=60
   udevadm settle
   blockdev --flushbufs --rereadpt "${1}"
-  until test -e "${1}p3"; do
+  until test -e "${1}p1"; do
     tries=$((tries + 1))
     if [ "${tries}" -ge "${max_tries}" ]; then
-      echo "Timed out waiting for ${1}p3 to appear."
+      echo "Timed out waiting for ${1}p1 to appear."
       echo "The runtime likely does not expose loop partition nodes."
       lsblk --output NAME,TYPE,SIZE "${1}" || true
       exit 1
@@ -121,7 +114,7 @@ function wait_until_settled() {
     partprobe "${1}" || true
     partx -u "${1}" || true
     udevadm settle || true
-    echo "${1}p3 doesn't exist yet..."
+    echo "${1}p1 doesn't exist yet..."
     sleep 1
   done
 }
@@ -131,7 +124,7 @@ function mount_image() {
   LOOPDEV=$(losetup --find --partscan --show "${1:-${IMAGE}}")
   # Partscan is racy
   wait_until_settled "${LOOPDEV}"
-  mount -o compress=zstd:1 "${LOOPDEV}p3" "${MOUNT}"
+  mount -o compress=zstd:1 "${LOOPDEV}p1" "${MOUNT}"
   # Setup bind mount to package cache
   mount --bind "/var/cache/pacman/pkg" "${MOUNT}/var/cache/pacman/pkg"
 }
@@ -181,10 +174,8 @@ function create_image() {
   cp -a "${IMAGE}" "${tmp_image}"
   if [ -n "${DISK_SIZE}" ]; then
     truncate -s "${DISK_SIZE}" "${tmp_image}"
-    sgdisk --align-end --delete 3 "${tmp_image}"
-    sgdisk --align-end --move-second-header \
-      --new 0:0:0 --typecode=0:8304 --change-name=0:'Arch Linux root' \
-      "${tmp_image}"
+    # Resize the only partition (p1) to use the extended disk space.
+    echo ',+' | sfdisk -N 1 "${tmp_image}"
   fi
   mount_image "${tmp_image}"
   if [ -n "${DISK_SIZE}" ]; then
@@ -235,7 +226,7 @@ function main() {
   fi
 
   local image_filter image_count
-  image_filter="${IMAGE_FILTER:-*}"
+  image_filter="${IMAGE_FILTER:-cloud-image.sh}"
   image_count=0
   for image in "${ORIG_PWD}/images/"!(base).sh; do
     if [[ ! "$(basename "${image}")" == ${image_filter} ]]; then

@@ -73,8 +73,17 @@ EOF
 
   # GRUB
   arch-chroot "${MOUNT}" /usr/bin/grub-install --target=i386-pc "${LOOPDEV}"
-  arch-chroot "${MOUNT}" /usr/bin/grub-install --target=x86_64-efi --efi-directory=/efi --removable
   sed -i 's/^GRUB_TIMEOUT=.*$/GRUB_TIMEOUT=1/' "${MOUNT}/etc/default/grub"
+  if grep -q '^GRUB_DISABLE_LINUX_UUID=' "${MOUNT}/etc/default/grub"; then
+    sed -i 's/^GRUB_DISABLE_LINUX_UUID=.*/GRUB_DISABLE_LINUX_UUID=true/' "${MOUNT}/etc/default/grub"
+  else
+    echo 'GRUB_DISABLE_LINUX_UUID=true' >>"${MOUNT}/etc/default/grub"
+  fi
+  if grep -q '^GRUB_DISABLE_LINUX_PARTUUID=' "${MOUNT}/etc/default/grub"; then
+    sed -i 's/^GRUB_DISABLE_LINUX_PARTUUID=.*/GRUB_DISABLE_LINUX_PARTUUID=true/' "${MOUNT}/etc/default/grub"
+  else
+    echo 'GRUB_DISABLE_LINUX_PARTUUID=true' >>"${MOUNT}/etc/default/grub"
+  fi
   # setup unpredictable kernel names
   sed -i 's/^GRUB_CMDLINE_LINUX=.*$/GRUB_CMDLINE_LINUX="net.ifnames=0"/' "${MOUNT}/etc/default/grub"
   sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT=\"rootflags=compress=zstd:1\"/' "${MOUNT}/etc/default/grub"
