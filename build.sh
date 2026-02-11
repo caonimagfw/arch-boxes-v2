@@ -5,7 +5,7 @@
 # errexit: "Exit immediately if [...] command exits with a non-zero status."
 set -o nounset -o errexit
 shopt -s extglob
-readonly DEFAULT_DISK_SIZE="2G"
+readonly DEFAULT_DISK_SIZE="5G"
 readonly IMAGE="image.img"
 # shellcheck disable=SC2016
 readonly MIRROR='https://fastly.mirror.pkgbuild.com/$repo/os/$arch'
@@ -52,8 +52,8 @@ function setup_disk() {
   LOOPDEV=$(losetup --find --partscan --show "${IMAGE}")
   # Partscan is racy
   wait_until_settled "${LOOPDEV}"
-  mkfs.btrfs "${LOOPDEV}p1"
-  mount -o compress=zstd:1 "${LOOPDEV}p1" "${MOUNT}"
+  mkfs.ext4 -F -O ^64bit,^metadata_csum "${LOOPDEV}p1"
+  mount "${LOOPDEV}p1" "${MOUNT}"
 }
 
 # Install Arch Linux to the filesystem (bootstrap)
@@ -72,7 +72,7 @@ EOF
   echo "Server = ${MIRROR}" >mirrorlist
 
   # We use the hosts package cache
-  pacstrap -c -C pacman.conf -K -M "${MOUNT}" base linux grub openssh sudo btrfs-progs qemu-guest-agent
+  pacstrap -c -C pacman.conf -K -M "${MOUNT}" base linux grub openssh sudo e2fsprogs qemu-guest-agent
   # Workaround for https://gitlab.archlinux.org/archlinux/arch-install-scripts/-/issues/56
   gpgconf --homedir "${MOUNT}/etc/pacman.d/gnupg" --kill gpg-agent
   cp mirrorlist "${MOUNT}/etc/pacman.d/"
@@ -124,7 +124,7 @@ function mount_image() {
   LOOPDEV=$(losetup --find --partscan --show "${1:-${IMAGE}}")
   # Partscan is racy
   wait_until_settled "${LOOPDEV}"
-  mount -o compress=zstd:1 "${LOOPDEV}p1" "${MOUNT}"
+  mount "${LOOPDEV}p1" "${MOUNT}"
   # Setup bind mount to package cache
   mount --bind "/var/cache/pacman/pkg" "${MOUNT}/var/cache/pacman/pkg"
 }
@@ -179,7 +179,7 @@ function create_image() {
   fi
   mount_image "${tmp_image}"
   if [ -n "${DISK_SIZE}" ]; then
-    btrfs filesystem resize max "${MOUNT}"
+    resize2fs "${LOOPDEV}p1"
   fi
 
   if [ 0 -lt "${#PACKAGES[@]}" ]; then

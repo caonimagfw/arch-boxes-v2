@@ -44,8 +44,8 @@ jobs:
             archlinux:latest \
             -lc '
               set -euo pipefail
-              pacman -Sy --noconfirm --needed btrfs-progs util-linux >/dev/null
-              command -v losetup mount mkfs.btrfs
+              pacman -Sy --noconfirm --needed e2fsprogs util-linux >/dev/null
+              command -v losetup mount mkfs.ext4
             '
 
       - name: Validate or cleanup release tag state
@@ -79,7 +79,7 @@ jobs:
               set -euo pipefail
               pacman -Syu --noconfirm \
                 arch-install-scripts \
-                btrfs-progs \
+                e2fsprogs \
                 jq \
                 qemu-img \
                 util-linux \

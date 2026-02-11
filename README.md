@@ -13,7 +13,7 @@ arch-boxes 提供面向 CloudCone `dd` 安装的 Arch Linux cloud raw 镜像构�
 构建前请安装以下依赖：
 
 * arch-install-scripts
-* btrfs-progs
+* e2fsprogs
 * curl
 * jq
 * qemu-img
@@ -141,7 +141,7 @@ lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT
 ```bash
 growpart /dev/vda 1
 mount | grep ' on / '
-btrfs filesystem resize max /
+resize2fs /dev/vda1
 ```
 
 方式 2（无 `growpart` 时，使用 `parted`）：
@@ -149,7 +149,7 @@ btrfs filesystem resize max /
 ```bash
 parted -s /dev/vda "resizepart 1 100%"
 partprobe /dev/vda
-btrfs filesystem resize max /
+resize2fs /dev/vda1
 ```
 
 已知限制与排障：

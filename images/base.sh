@@ -8,10 +8,11 @@ function pre() {
   rm "${MOUNT}/etc/machine-id"
 
   # Swap
-  arch-chroot "${MOUNT}" /usr/bin/btrfs subvolume create /swap
-  chattr +C "${MOUNT}/swap"
+  mkdir -p "${MOUNT}/swap"
   chmod 0700 "${MOUNT}/swap"
-  arch-chroot "${MOUNT}" /usr/bin/btrfs filesystem mkswapfile --size 512m --uuid clear /swap/swapfile
+  dd if=/dev/zero of="${MOUNT}/swap/swapfile" bs=1M count=2048 status=none
+  chmod 0600 "${MOUNT}/swap/swapfile"
+  mkswap "${MOUNT}/swap/swapfile" >/dev/null
   echo -e "/swap/swapfile none swap defaults 0 0" >>"${MOUNT}/etc/fstab"
 
   arch-chroot "${MOUNT}" /usr/bin/systemd-firstboot --locale=C.UTF-8 --timezone=UTC --hostname=archlinux --keymap=us
@@ -86,6 +87,6 @@ EOF
   fi
   # setup unpredictable kernel names
   sed -i 's/^GRUB_CMDLINE_LINUX=.*$/GRUB_CMDLINE_LINUX="net.ifnames=0"/' "${MOUNT}/etc/default/grub"
-  sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT=\"rootflags=compress=zstd:1\"/' "${MOUNT}/etc/default/grub"
+  sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT=\"\"/' "${MOUNT}/etc/default/grub"
   arch-chroot "${MOUNT}" /usr/bin/grub-mkconfig -o /boot/grub/grub.cfg
 }
