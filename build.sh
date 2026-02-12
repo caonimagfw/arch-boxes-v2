@@ -52,7 +52,7 @@ function setup_disk() {
   LOOPDEV=$(losetup --find --partscan --show "${IMAGE}")
   # Partscan is racy
   wait_until_settled "${LOOPDEV}"
-  mkfs.ext3 -F "${LOOPDEV}p1"
+  mkfs.ext3 -F -I 128 "${LOOPDEV}p1"
   mount "${LOOPDEV}p1" "${MOUNT}"
 }
 
