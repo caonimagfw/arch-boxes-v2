@@ -52,7 +52,7 @@ function setup_disk() {
   LOOPDEV=$(losetup --find --partscan --show "${IMAGE}")
   # Partscan is racy
   wait_until_settled "${LOOPDEV}"
-  mkfs.ext4 -F -O ^64bit,^metadata_csum "${LOOPDEV}p1"
+  mkfs.ext4 -F -O ^64bit,^metadata_csum,^metadata_csum_seed,^orphan_file,^large_dir,^inline_data "${LOOPDEV}p1"
   mount "${LOOPDEV}p1" "${MOUNT}"
 }
 
