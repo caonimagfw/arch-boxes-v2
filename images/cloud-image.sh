@@ -8,10 +8,33 @@ PACKAGES=(cloud-init cloud-guest-utils)
 SERVICES=(cloud-init-main.service cloud-init-local.service cloud-init-network.service cloud-config.service cloud-final.service)
 
 function pre() {
+  # Configure /etc/default/grub for future 'grub-mkconfig' on the live VPS.
   sed -Ei 's/^(GRUB_CMDLINE_LINUX_DEFAULT=.*)"$/\1 console=tty0 console=ttyS0,115200"/' "${MOUNT}/etc/default/grub"
   echo 'GRUB_TERMINAL="serial console"' >>"${MOUNT}/etc/default/grub"
   echo 'GRUB_SERIAL_COMMAND="serial --speed=115200"' >>"${MOUNT}/etc/default/grub"
-  arch-chroot "${MOUNT}" /usr/bin/grub-mkconfig -o /boot/grub/grub.cfg
+
+  # Write grub.cfg with serial console for CloudCone VNC/serial access.
+  mkdir -p "${MOUNT}/boot/grub"
+  cat <<'GRUBCFG' >"${MOUNT}/boot/grub/grub.cfg"
+insmod ext2
+set root=(hd0)
+set timeout=1
+set default=0
+
+serial --speed=115200
+terminal_input serial console
+terminal_output serial console
+
+menuentry "Arch Linux" {
+    linux /boot/vmlinuz-linux root=/dev/vda rw net.ifnames=0 console=tty0 console=ttyS0,115200
+    initrd /boot/initramfs-linux.img
+}
+
+menuentry "Arch Linux (fallback)" {
+    linux /boot/vmlinuz-linux root=/dev/vda rw net.ifnames=0 console=tty0 console=ttyS0,115200
+    initrd /boot/initramfs-linux-fallback.img
+}
+GRUBCFG
 }
 
 function post() {

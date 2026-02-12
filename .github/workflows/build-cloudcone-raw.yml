@@ -39,7 +39,6 @@ jobs:
           sudo docker info >/dev/null
           sudo docker run --rm --privileged \
             -v /dev:/dev \
-            -v /run/udev:/run/udev:ro \
             --entrypoint bash \
             archlinux:latest \
             -lc '
@@ -70,7 +69,6 @@ jobs:
           set -euo pipefail
           sudo docker run --rm --privileged \
             -v /dev:/dev \
-            -v /run/udev:/run/udev:ro \
             -e "IMAGE_FILTER=${IMAGE_FILTER}" \
             -v "${PWD}:/workspace" \
             -w /workspace \
@@ -80,8 +78,6 @@ jobs:
               pacman -Syu --noconfirm \
                 arch-install-scripts \
                 e2fsprogs \
-                jq \
-                qemu-img \
                 util-linux \
                 zstd
               chmod +x ./build.sh ./images/*.sh

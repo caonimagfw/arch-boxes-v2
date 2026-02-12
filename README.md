@@ -4,10 +4,10 @@ arch-boxes 提供面向 CloudCone `dd` 安装的 Arch Linux cloud raw 镜像构�
 
 ## 镜像类型
 
-### Cloud Raw 镜像（BIOS + MBR）
-当前仓库仅保留 CloudCone 场景的 cloud 镜像产物链路。镜像预装 [`cloud-init`](https://cloud-init.io/)，并使用 BIOS + MBR 分区布局 + ext4 文件系统（Debian 11 兼容格式），以保证 CloudCone 宿主 GRUB 可正常引导。更多说明可参考 [ArchWiki: Arch Linux on a VPS](https://wiki.archlinux.org/title/Arch_Linux_on_a_VPS#Official_Arch_Linux_cloud_image)。
+### Cloud Raw 镜像（Superfloppy + ext4）
+当前仓库仅保留 CloudCone / LinkCode 场景的 cloud 镜像产物链路。镜像预装 [`cloud-init`](https://cloud-init.io/)，并使用 **Superfloppy** 布局（无分区表，ext4 文件系统直接从磁盘第 0 字节开始），由宿主 GRUB 从 `(hd0)` 直接读取引导配置。更多说明可参考 [ArchWiki: Arch Linux on a VPS](https://wiki.archlinux.org/title/Arch_Linux_on_a_VPS#Official_Arch_Linux_cloud_image)。
 
-> **注意**：构建时使用 `debian11-mke2fs.conf` 配置文件控制 `mkfs.ext4`，避免 Arch 最新 e2fsprogs 默认启用的 `metadata_csum_seed` / `orphan_file` 等新特性导致老 GRUB 无法识别文件系统。
+> **注意**：构建时使用 `debian11-mke2fs.conf` 配置文件控制 `mkfs.ext4`，避免 Arch 最新 e2fsprogs 默认启用的 `metadata_csum_seed` / `orphan_file` 等新特性导致宿主 GRUB 无法识别文件系统。Superfloppy 模式下无需 `grub-install`，宿主 GRUB 直接读 `/boot/grub/grub.cfg`。
 
 ## 开发与构建
 
@@ -96,62 +96,31 @@ sync
 3. 在面板切回 VPS 系统盘启动
 4. 正常开机
 
-### 重启黑屏 / GRUB 无法启动的修复（BIOS + MBR）
+### 重启黑屏 / GRUB 无法启动的修复（Superfloppy）
 
-如果 `dd` 后虚拟机黑屏或卡在 GRUB 阶段：
+如果 `dd` 后虚拟机无法启动：
 
 1. 进入救援系统
-2. 确认镜像写入目标盘正确（`/dev/vda`）
-3. 挂载根分区，重建 GRUB 配置
-4. 重装 BIOS GRUB，然后重启
+2. 挂载根文件系统（Superfloppy 模式下是 `/dev/vda`，不是 `/dev/vda1`）
+3. 检查或重写 `/boot/grub/grub.cfg`
 
 参考修复命令：
 
 ```bash
-mount /dev/vda1 /mnt
-arch-chroot /mnt grub-install --target=i386-pc /dev/vda
-arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
+mount /dev/vda /mnt
+cat /mnt/boot/grub/grub.cfg          # 检查 grub.cfg 是否正确
+arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg   # 重新生成
 sync
 reboot
 ```
 
-### 引导加载器损坏：通过救援系统重装 BIOS GRUB
+### 修复：启动后仅识别 5G 空间
 
-当引导文件损坏或丢失时，可在救援系统执行：
-
-```bash
-mount /dev/vda1 /mnt
-arch-chroot /mnt pacman -S --noconfirm grub
-arch-chroot /mnt grub-install --target=i386-pc /dev/vda
-arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
-sync
-reboot
-```
-
-### 修复：启动后仅识别 2G 空间
-
-若系统已启动但根盘仍只有约 `2G`，需要扩展第 1 分区并扩大文件系统。
-
-先查看当前磁盘布局：
+若系统已启动但根盘仍只有约 `5G`（镜像原始大小），需扩大文件系统。
+Superfloppy 模式无分区表，直接扩展文件系统即可：
 
 ```bash
-lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT
-```
-
-方式 1（推荐，使用 `growpart`）：
-
-```bash
-growpart /dev/vda 1
-mount | grep ' on / '
-resize2fs /dev/vda1
-```
-
-方式 2（无 `growpart` 时，使用 `parted`）：
-
-```bash
-parted -s /dev/vda "resizepart 1 100%"
-partprobe /dev/vda
-resize2fs /dev/vda1
+resize2fs /dev/vda
 ```
 
 已知限制与排障：
