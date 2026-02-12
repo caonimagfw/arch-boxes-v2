@@ -5,7 +5,9 @@ arch-boxes 提供面向 CloudCone `dd` 安装的 Arch Linux cloud raw 镜像构�
 ## 镜像类型
 
 ### Cloud Raw 镜像（BIOS + MBR）
-当前仓库仅保留 CloudCone 场景的 cloud 镜像产物链路。镜像预装 [`cloud-init`](https://cloud-init.io/)，并使用 BIOS + MBR 分区布局，以提升老式引导环境兼容性。更多说明可参考 [ArchWiki: Arch Linux on a VPS](https://wiki.archlinux.org/title/Arch_Linux_on_a_VPS#Official_Arch_Linux_cloud_image)。
+当前仓库仅保留 CloudCone 场景的 cloud 镜像产物链路。镜像预装 [`cloud-init`](https://cloud-init.io/)，并使用 BIOS + MBR 分区布局 + ext4 文件系统（Debian 11 兼容格式），以保证 CloudCone 宿主 GRUB 可正常引导。更多说明可参考 [ArchWiki: Arch Linux on a VPS](https://wiki.archlinux.org/title/Arch_Linux_on_a_VPS#Official_Arch_Linux_cloud_image)。
+
+> **注意**：构建时使用 `debian11-mke2fs.conf` 配置文件控制 `mkfs.ext4`，避免 Arch 最新 e2fsprogs 默认启用的 `metadata_csum_seed` / `orphan_file` 等新特性导致老 GRUB 无法识别文件系统。
 
 ## 开发与构建
 

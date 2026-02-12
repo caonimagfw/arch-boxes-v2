@@ -52,7 +52,9 @@ function setup_disk() {
   LOOPDEV=$(losetup --find --partscan --show "${IMAGE}")
   # Partscan is racy
   wait_until_settled "${LOOPDEV}"
-  mkfs.ext3 -F -b 1024 -I 128 -O ^dir_index "${LOOPDEV}p1"
+  # Use Debian 11 mke2fs.conf so the ext4 filesystem matches what CloudCone's
+  # host GRUB can read (no metadata_csum_seed / orphan_file incompat features).
+  MKE2FS_CONFIG="${ORIG_PWD}/debian11-mke2fs.conf" mkfs.ext4 -F "${LOOPDEV}p1"
   mount "${LOOPDEV}p1" "${MOUNT}"
 }
 

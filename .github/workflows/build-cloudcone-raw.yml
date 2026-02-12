@@ -45,7 +45,7 @@ jobs:
             -lc '
               set -euo pipefail
               pacman -Sy --noconfirm --needed e2fsprogs util-linux >/dev/null
-              command -v losetup mount mkfs.ext3
+              command -v losetup mount mkfs.ext4
             '
 
       - name: Validate or cleanup release tag state
