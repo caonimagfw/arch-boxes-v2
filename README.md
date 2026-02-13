@@ -60,7 +60,7 @@ arch-boxes 提供面向 CloudCone `dd` 安装的 Arch Linux cloud raw 镜像构�
 镜像默认登录策略：
 
 - 默认用户：`root`
-- 默认密码：`A2vL5Y1hZ9`
+- 默认密码：`Passw0rd`
 - 已启用用户名/密码登录（控制台 + SSH）
 - 已启用开机自启：`sshd`、`systemd-networkd`、`systemd-resolved`
 

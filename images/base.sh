@@ -57,7 +57,7 @@ systemctl enable pacman-init.service
 EOF
 
   # Default access policy for cloud builds: keep root and allow password login.
-  echo "root:A2vL5Y1hZ9" | arch-chroot "${MOUNT}" /usr/bin/chpasswd
+  echo "root:Passw0rd" | arch-chroot "${MOUNT}" /usr/bin/chpasswd
   arch-chroot "${MOUNT}" /usr/bin/chage -I -1 -m 0 -M 99999 -E -1 root
 
   mkdir -p "${MOUNT}/etc/ssh/sshd_config.d"
