@@ -4,13 +4,25 @@ arch-boxes 提供面向 CloudCone `dd` 安装的 Arch Linux cloud raw 镜像构�
 
 ## 镜像类型
 
-### Cloud Raw 镜像（MBR + Debian 11 兼容 ext4）
-当前仓库仅保留 CloudCone / LinkCode 场景的 cloud 镜像产物链路。镜像预装 [`cloud-init`](https://cloud-init.io/)，使用 MBR 单分区布局 + Debian 11 兼容 ext4 文件系统。更多说明可参考 [ArchWiki: Arch Linux on a VPS](https://wiki.archlinux.org/title/Arch_Linux_on_a_VPS#Official_Arch_Linux_cloud_image)。
+### Cloud Raw 镜像（Superfloppy + MBR 注入 + Debian 11 兼容 ext4）
+当前仓库仅保留 CloudCone / LinkCode 场景的 cloud 镜像产物链路。镜像预装 [`cloud-init`](https://cloud-init.io/)，使用 **Superfloppy + 后置 MBR 注入** 布局 + Debian 11 兼容 ext4 文件系统。更多说明可参考 [ArchWiki: Arch Linux on a VPS](https://wiki.archlinux.org/title/Arch_Linux_on_a_VPS#Official_Arch_Linux_cloud_image)。
 
-宿主 GRUB 为 CentOS/RHEL 8 版本（`GRUB 2.02-81.el8`），通过 `configfile` 方式读取客户盘上的引导配置：
+#### 磁盘布局原理
+
+CloudCone 宿主 GRUB 为 CentOS/RHEL 8 版本（`GRUB 2.02-81.el8`），通过 `configfile` 方式读取客户盘引导配置，且固定使用 `(hd0,msdos1)` 作为根设备：
 
 - **Grub 2**：`set root=(hd0,msdos1); configfile /boot/grub2/grub.cfg`
 - **Grub Legacy**：`set root=(hd0,msdos1); legacy_configfile /boot/grub/grub.conf`
+
+该版本 GRUB 的 ext2 模块存在兼容性问题：当 ext4 文件系统位于标准分区偏移（通常 1 MiB）时，**目录遍历结果乱码**；但文件系统从字节 0 开始（superfloppy 模式）时可以正常读取。
+
+本方案的解决思路：
+
+1. **构建时**：以 superfloppy 方式创建 ext4（文件系统从字节 0 开始）
+2. **构建后**：往镜像的前 512 字节注入一个最小 MBR 分区表，分区 1 的 LBA 起始 = 0，覆盖整个磁盘
+3. ext4 的 "boot block"（字节 0-1023）是保留区域，超级块从字节 1024 开始，MBR 写入字节 446-511 不会破坏文件系统
+4. GRUB 解析 `(hd0,msdos1)` 时，分区偏移 = 0，等效于 `(hd0)` — 文件系统可正常读取
+5. VPS 的 Linux 内核检测到 MBR 后创建 `/dev/vda1`，`fstab` 和内核参数 `root=/dev/vda1` 正常工作
 
 镜像使用符号链接 `/boot/grub2` → `/boot/grub` 兼容 RHEL 路径约定，并同时提供 `grub.cfg`（GRUB 2）和 `grub.conf`（Grub Legacy）。不需要 `grub-install`（宿主提供引导器，我们只提供配置文件）。
 
@@ -145,10 +157,12 @@ reboot
 
 ### 重启黑屏 / GRUB 无法启动的修复（救援系统）
 
-如果 `dd` 后虚拟机无法启动，可通过救援系统修复：
+如果 `dd` 后虚拟机无法启动，可通过救援系统修复。
+
+> **注意**：镜像使用 Superfloppy + MBR 注入布局，分区 1 起始于 LBA 0。救援系统中 `/dev/vda1` 和 `/dev/vda` 实际指向同一数据，若 `/dev/vda1` 不存在，可直接使用 `/dev/vda`。
 
 ```bash
-mount /dev/vda1 /mnt
+mount /dev/vda1 /mnt  # 若不存在，改用: mount /dev/vda /mnt
 mkdir -p /mnt/boot/grub
 cat <<'EOF' > /mnt/boot/grub/grub.cfg
 set root=(hd0,msdos1)
@@ -177,7 +191,9 @@ reboot
 
 ### 修复：启动后仅识别 5G 空间
 
-若系统已启动但根盘仍只有约 `5G`（镜像原始大小），需扩展分区并扩大文件系统：
+若系统已启动但根盘仍只有约 `5G`（镜像原始大小），需扩展分区和文件系统。
+
+由于镜像使用 Superfloppy + MBR 注入布局（分区 1 起始于 LBA 0），扩展方式如下：
 
 方式 1（推荐，使用 `growpart`）：
 
@@ -186,10 +202,11 @@ growpart /dev/vda 1
 resize2fs /dev/vda1
 ```
 
-方式 2（无 `growpart` 时，使用 `parted`）：
+方式 2（无 `growpart` 时，使用 `sfdisk` 重写分区表）：
 
 ```bash
-parted -s /dev/vda "resizepart 1 100%"
+# 删除旧分区并重建覆盖全盘的分区（数据不变，只改分区表）
+echo ',,L,*' | sfdisk --force /dev/vda
 partprobe /dev/vda
 resize2fs /dev/vda1
 ```

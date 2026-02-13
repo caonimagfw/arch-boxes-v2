@@ -43,20 +43,23 @@ function cleanup() {
 }
 trap cleanup EXIT
 
-# Create the disk, partition it, format the partition and mount the filesystem.
-# MBR + single Linux partition + Debian 11-compatible ext4.
-# CloudCone host GRUB requires (hd0,msdos1) — a partitioned disk is mandatory.
+# Create the disk image as a "superfloppy" — ext4 starting at byte 0,
+# no partition table during build.  After unmount we inject a fake MBR
+# so CloudCone host GRUB can address it as (hd0,msdos1).
+#
+# Why: host GRUB 2.02's ext2 module can traverse ext4 directories when
+# the filesystem starts at byte 0 (proven with superfloppy), but garbles
+# directory listings when the filesystem sits behind a real 1 MiB partition
+# offset.  The fake-MBR trick sets partition 1 LBA-start = 0, so GRUB
+# resolves (hd0,msdos1) to byte 0 — identical to (hd0).
 function setup_disk() {
   truncate -s "${DEFAULT_DISK_SIZE}" "${IMAGE}"
-  echo ',,L,*' | sfdisk "${IMAGE}"
 
-  LOOPDEV=$(losetup --find --partscan --show "${IMAGE}")
-  # Partscan is racy
-  wait_until_settled "${LOOPDEV}"
+  LOOPDEV=$(losetup --find --show "${IMAGE}")
   # Use Debian 11 mke2fs.conf so the ext4 filesystem matches what CloudCone's
   # host GRUB can read (no metadata_csum_seed / orphan_file incompat features).
-  MKE2FS_CONFIG="${ORIG_PWD}/debian11-mke2fs.conf" mkfs.ext4 -F "${LOOPDEV}p1"
-  mount "${LOOPDEV}p1" "${MOUNT}"
+  MKE2FS_CONFIG="${ORIG_PWD}/debian11-mke2fs.conf" mkfs.ext4 -F "${LOOPDEV}"
+  mount "${LOOPDEV}" "${MOUNT}"
 }
 
 # Install Arch Linux to the filesystem (bootstrap)
@@ -99,35 +102,10 @@ function image_cleanup() {
   fstrim --verbose "${MOUNT}"
 }
 
-# Helper function: wait until a given loop device has settled
-# ${1} - loop device
-function wait_until_settled() {
-  local tries=0
-  local max_tries=60
-  udevadm settle
-  blockdev --flushbufs --rereadpt "${1}"
-  until test -e "${1}p1"; do
-    tries=$((tries + 1))
-    if [ "${tries}" -ge "${max_tries}" ]; then
-      echo "Timed out waiting for ${1}p1 to appear."
-      echo "The runtime likely does not expose loop partition nodes."
-      lsblk --output NAME,TYPE,SIZE "${1}" || true
-      exit 1
-    fi
-    partprobe "${1}" || true
-    partx -u "${1}" || true
-    udevadm settle || true
-    echo "${1}p1 doesn't exist yet..."
-    sleep 1
-  done
-}
-
-# Mount image helper (loop device + mount)
+# Mount image helper (loop device + mount) — superfloppy, no partitions
 function mount_image() {
-  LOOPDEV=$(losetup --find --partscan --show "${1:-${IMAGE}}")
-  # Partscan is racy
-  wait_until_settled "${LOOPDEV}"
-  mount "${LOOPDEV}p1" "${MOUNT}"
+  LOOPDEV=$(losetup --find --show "${1:-${IMAGE}}")
+  mount "${LOOPDEV}" "${MOUNT}"
   # Setup bind mount to package cache
   mount --bind "/var/cache/pacman/pkg" "${MOUNT}/var/cache/pacman/pkg"
 }
@@ -137,6 +115,48 @@ function unmount_image() {
   umount --recursive "${MOUNT}"
   losetup -d "${LOOPDEV}"
   LOOPDEV=""
+}
+
+# Inject a minimal MBR partition table into a superfloppy image.
+# Partition 1 starts at LBA 0 and spans the entire image.
+#
+# This lets CloudCone host GRUB address the disk as (hd0,msdos1) while
+# the ext4 filesystem still begins at byte 0 (where GRUB 2.02 can read
+# it without garbling directory listings).
+#
+# Safety: ext4's "boot block" (bytes 0-1023) is reserved / unused by the
+# filesystem.  The superblock lives at byte 1024.  Writing a 66-byte MBR
+# structure at offsets 446-511 is harmless.
+#
+# On the VPS the Linux kernel detects the MBR and exposes /dev/vda1,
+# so root=/dev/vda1 and fstab entries work as expected.
+function inject_mbr() {
+  local image="${1}"
+  local total_bytes total_sectors
+  total_bytes=$(stat -c %s "${image}")
+  total_sectors=$(( total_bytes / 512 ))
+
+  # Little-endian bytes of total_sectors (4 bytes)
+  local s0 s1 s2 s3
+  s0=$(printf '%02x' $(( total_sectors & 0xFF )))
+  s1=$(printf '%02x' $(( (total_sectors >> 8)  & 0xFF )))
+  s2=$(printf '%02x' $(( (total_sectors >> 16) & 0xFF )))
+  s3=$(printf '%02x' $(( (total_sectors >> 24) & 0xFF )))
+
+  # 16-byte partition entry at offset 446:
+  #   80           = bootable
+  #   00 01 00     = CHS start (head 0, sector 1, cylinder 0)
+  #   83           = Linux partition type
+  #   FE FF FF     = CHS end   (LBA-mode max)
+  #   00 00 00 00  = LBA start = 0
+  #   s0 s1 s2 s3  = LBA size  = total_sectors
+  printf '\x80\x00\x01\x00\x83\xfe\xff\xff\x00\x00\x00\x00\x'"${s0}"'\x'"${s1}"'\x'"${s2}"'\x'"${s3}" | \
+    dd of="${image}" bs=1 seek=446 conv=notrunc status=none
+
+  # MBR boot signature
+  printf '\x55\xaa' | dd of="${image}" bs=1 seek=510 conv=notrunc status=none
+
+  echo "MBR injected: partition 1 @ LBA 0, ${total_sectors} sectors ($(( total_bytes / 1024 / 1024 )) MiB)"
 }
 
 # Compute SHA256, adjust owner to $SUDO_UID:$SUDO_UID and move to output/
@@ -177,11 +197,10 @@ function create_image() {
   cp -a "${IMAGE}" "${tmp_image}"
   if [ -n "${DISK_SIZE}" ]; then
     truncate -s "${DISK_SIZE}" "${tmp_image}"
-    echo ',+' | sfdisk -N 1 "${tmp_image}"
   fi
   mount_image "${tmp_image}"
   if [ -n "${DISK_SIZE}" ]; then
-    resize2fs "${LOOPDEV}p1"
+    resize2fs "${LOOPDEV}"
   fi
 
   if [ 0 -lt "${#PACKAGES[@]}" ]; then
@@ -193,6 +212,7 @@ function create_image() {
   "${2}"
   image_cleanup
   unmount_image
+  inject_mbr "${tmp_image}"
   "${3}" "${tmp_image}" "${1}"
   mv_to_output "${1}"
 }
