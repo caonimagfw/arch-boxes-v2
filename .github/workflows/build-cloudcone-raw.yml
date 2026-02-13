@@ -39,12 +39,13 @@ jobs:
           sudo docker info >/dev/null
           sudo docker run --rm --privileged \
             -v /dev:/dev \
+            -v /run/udev:/run/udev:ro \
             --entrypoint bash \
             archlinux:latest \
             -lc '
               set -euo pipefail
               pacman -Sy --noconfirm --needed e2fsprogs util-linux >/dev/null
-              command -v losetup mount mkfs.ext4
+              command -v losetup mount mkfs.ext4 sfdisk
             '
 
       - name: Validate or cleanup release tag state
@@ -69,6 +70,7 @@ jobs:
           set -euo pipefail
           sudo docker run --rm --privileged \
             -v /dev:/dev \
+            -v /run/udev:/run/udev:ro \
             -e "IMAGE_FILTER=${IMAGE_FILTER}" \
             -v "${PWD}:/workspace" \
             -w /workspace \

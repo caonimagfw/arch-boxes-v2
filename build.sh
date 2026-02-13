@@ -43,16 +43,20 @@ function cleanup() {
 }
 trap cleanup EXIT
 
-# Create the disk image, format it, and mount the filesystem.
-# Superfloppy layout: NO partition table — ext4 filesystem starts at byte 0.
-# CloudCone / LinkCode host GRUB reads (hd0) directly as a filesystem.
+# Create the disk, partition it, format the partition and mount the filesystem.
+# MBR + single Linux partition + Debian 11-compatible ext4.
+# CloudCone host GRUB requires (hd0,msdos1) — a partitioned disk is mandatory.
 function setup_disk() {
   truncate -s "${DEFAULT_DISK_SIZE}" "${IMAGE}"
+  echo ',,L,*' | sfdisk "${IMAGE}"
+
+  LOOPDEV=$(losetup --find --partscan --show "${IMAGE}")
+  # Partscan is racy
+  wait_until_settled "${LOOPDEV}"
   # Use Debian 11 mke2fs.conf so the ext4 filesystem matches what CloudCone's
   # host GRUB can read (no metadata_csum_seed / orphan_file incompat features).
-  MKE2FS_CONFIG="${ORIG_PWD}/debian11-mke2fs.conf" mkfs.ext4 -F "${IMAGE}"
-  LOOPDEV=$(losetup --find --show "${IMAGE}")
-  mount "${LOOPDEV}" "${MOUNT}"
+  MKE2FS_CONFIG="${ORIG_PWD}/debian11-mke2fs.conf" mkfs.ext4 -F "${LOOPDEV}p1"
+  mount "${LOOPDEV}p1" "${MOUNT}"
 }
 
 # Install Arch Linux to the filesystem (bootstrap)
@@ -95,10 +99,35 @@ function image_cleanup() {
   fstrim --verbose "${MOUNT}"
 }
 
+# Helper function: wait until a given loop device has settled
+# ${1} - loop device
+function wait_until_settled() {
+  local tries=0
+  local max_tries=60
+  udevadm settle
+  blockdev --flushbufs --rereadpt "${1}"
+  until test -e "${1}p1"; do
+    tries=$((tries + 1))
+    if [ "${tries}" -ge "${max_tries}" ]; then
+      echo "Timed out waiting for ${1}p1 to appear."
+      echo "The runtime likely does not expose loop partition nodes."
+      lsblk --output NAME,TYPE,SIZE "${1}" || true
+      exit 1
+    fi
+    partprobe "${1}" || true
+    partx -u "${1}" || true
+    udevadm settle || true
+    echo "${1}p1 doesn't exist yet..."
+    sleep 1
+  done
+}
+
 # Mount image helper (loop device + mount)
 function mount_image() {
-  LOOPDEV=$(losetup --find --show "${1:-${IMAGE}}")
-  mount "${LOOPDEV}" "${MOUNT}"
+  LOOPDEV=$(losetup --find --partscan --show "${1:-${IMAGE}}")
+  # Partscan is racy
+  wait_until_settled "${LOOPDEV}"
+  mount "${LOOPDEV}p1" "${MOUNT}"
   # Setup bind mount to package cache
   mount --bind "/var/cache/pacman/pkg" "${MOUNT}/var/cache/pacman/pkg"
 }
@@ -148,10 +177,11 @@ function create_image() {
   cp -a "${IMAGE}" "${tmp_image}"
   if [ -n "${DISK_SIZE}" ]; then
     truncate -s "${DISK_SIZE}" "${tmp_image}"
+    echo ',+' | sfdisk -N 1 "${tmp_image}"
   fi
   mount_image "${tmp_image}"
   if [ -n "${DISK_SIZE}" ]; then
-    resize2fs "${LOOPDEV}"
+    resize2fs "${LOOPDEV}p1"
   fi
 
   if [ 0 -lt "${#PACKAGES[@]}" ]; then

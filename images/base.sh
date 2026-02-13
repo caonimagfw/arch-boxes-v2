@@ -7,8 +7,8 @@ function pre() {
   # https://gitlab.archlinux.org/archlinux/arch-boxes/-/issues/117
   rm "${MOUNT}/etc/machine-id"
 
-  # fstab — superfloppy: root filesystem is /dev/vda (no partition)
-  echo "/dev/vda / ext4 rw,relatime 0 1" >>"${MOUNT}/etc/fstab"
+  # fstab
+  echo "/dev/vda1 / ext4 rw,relatime 0 1" >>"${MOUNT}/etc/fstab"
 
   # Swap
   mkdir -p "${MOUNT}/swap"
@@ -75,31 +75,50 @@ chpasswd:
   expire: false
 EOF
 
-  # GRUB — Superfloppy: host GRUB reads (hd0)/boot/grub/grub.cfg directly.
-  # No grub-install needed (host provides MBR bootloader).
-  # Configure /etc/default/grub so 'grub-mkconfig' works on the live VPS.
+  # GRUB — Host GRUB is CentOS/RHEL 8 (GRUB 2.02-81.el8).
+  # It reads config via 'configfile', NOT MBR chainload:
+  #   Grub 2:    set root=(hd0,msdos1); configfile /boot/grub2/grub.cfg
+  #   Legacy:    set root=(hd0,msdos1); legacy_configfile /boot/grub/grub.conf
+  #
+  # No grub-install needed. We write static configs with correct device paths.
+  # Arch's /boot/grub/ is symlinked to /boot/grub2/ for RHEL host compatibility.
+
+  # Configure /etc/default/grub for future 'grub-mkconfig' on the live VPS.
   sed -i 's/^GRUB_TIMEOUT=.*$/GRUB_TIMEOUT=1/' "${MOUNT}/etc/default/grub"
   sed -i 's/^GRUB_CMDLINE_LINUX=.*$/GRUB_CMDLINE_LINUX="net.ifnames=0"/' "${MOUNT}/etc/default/grub"
   sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT=\"\"/' "${MOUNT}/etc/default/grub"
   echo 'GRUB_DISABLE_LINUX_UUID=true' >>"${MOUNT}/etc/default/grub"
   echo 'GRUB_DISABLE_LINUX_PARTUUID=true' >>"${MOUNT}/etc/default/grub"
 
-  # Write static grub.cfg (cloud-image.sh will overwrite with serial console).
+  # GRUB 2 config — cloud-image.sh will overwrite with serial console.
   mkdir -p "${MOUNT}/boot/grub"
   cat <<'GRUBCFG' >"${MOUNT}/boot/grub/grub.cfg"
-insmod ext2
-set root=(hd0)
+set root=(hd0,msdos1)
 set timeout=1
 set default=0
 
 menuentry "Arch Linux" {
-    linux /boot/vmlinuz-linux root=/dev/vda rw net.ifnames=0
+    linux /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0
     initrd /boot/initramfs-linux.img
 }
 
 menuentry "Arch Linux (fallback)" {
-    linux /boot/vmlinuz-linux root=/dev/vda rw net.ifnames=0
+    linux /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0
     initrd /boot/initramfs-linux-fallback.img
 }
 GRUBCFG
+
+  # Symlink: /boot/grub2 → /boot/grub (RHEL host expects /boot/grub2/)
+  ln -sf grub "${MOUNT}/boot/grub2"
+
+  # Grub Legacy config for host's fallback "Grub Legacy" option.
+  cat <<'LEGACYCFG' >"${MOUNT}/boot/grub/grub.conf"
+default 0
+timeout 1
+
+title Arch Linux
+root (hd0,0)
+kernel /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0
+initrd /boot/initramfs-linux.img
+LEGACYCFG
 }

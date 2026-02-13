@@ -4,10 +4,17 @@ arch-boxes 提供面向 CloudCone `dd` 安装的 Arch Linux cloud raw 镜像构�
 
 ## 镜像类型
 
-### Cloud Raw 镜像（Superfloppy + ext4）
-当前仓库仅保留 CloudCone / LinkCode 场景的 cloud 镜像产物链路。镜像预装 [`cloud-init`](https://cloud-init.io/)，并使用 **Superfloppy** 布局（无分区表，ext4 文件系统直接从磁盘第 0 字节开始），由宿主 GRUB 从 `(hd0)` 直接读取引导配置。更多说明可参考 [ArchWiki: Arch Linux on a VPS](https://wiki.archlinux.org/title/Arch_Linux_on_a_VPS#Official_Arch_Linux_cloud_image)。
+### Cloud Raw 镜像（MBR + Debian 11 兼容 ext4）
+当前仓库仅保留 CloudCone / LinkCode 场景的 cloud 镜像产物链路。镜像预装 [`cloud-init`](https://cloud-init.io/)，使用 MBR 单分区布局 + Debian 11 兼容 ext4 文件系统。更多说明可参考 [ArchWiki: Arch Linux on a VPS](https://wiki.archlinux.org/title/Arch_Linux_on_a_VPS#Official_Arch_Linux_cloud_image)。
 
-> **注意**：构建时使用 `debian11-mke2fs.conf` 配置文件控制 `mkfs.ext4`，避免 Arch 最新 e2fsprogs 默认启用的 `metadata_csum_seed` / `orphan_file` 等新特性导致宿主 GRUB 无法识别文件系统。Superfloppy 模式下无需 `grub-install`，宿主 GRUB 直接读 `/boot/grub/grub.cfg`。
+宿主 GRUB 为 CentOS/RHEL 8 版本（`GRUB 2.02-81.el8`），通过 `configfile` 方式读取客户盘上的引导配置：
+
+- **Grub 2**：`set root=(hd0,msdos1); configfile /boot/grub2/grub.cfg`
+- **Grub Legacy**：`set root=(hd0,msdos1); legacy_configfile /boot/grub/grub.conf`
+
+镜像使用符号链接 `/boot/grub2` → `/boot/grub` 兼容 RHEL 路径约定，并同时提供 `grub.cfg`（GRUB 2）和 `grub.conf`（Grub Legacy）。不需要 `grub-install`（宿主提供引导器，我们只提供配置文件）。
+
+> **注意**：构建时使用 `debian11-mke2fs.conf` 控制 `mkfs.ext4`，避免 Arch 最新 e2fsprogs 默认启用的 `metadata_csum_seed` / `orphan_file` 等 incompat 特性导致宿主 GRUB 无法识别文件系统。
 
 ## 开发与构建
 
@@ -16,10 +23,8 @@ arch-boxes 提供面向 CloudCone `dd` 安装的 Arch Linux cloud raw 镜像构�
 
 * arch-install-scripts
 * e2fsprogs
-* curl
-* jq
-* qemu-img
 * util-linux
+* zstd
 
 ### 本地构建
 以 `root` 身份执行：
@@ -96,31 +101,97 @@ sync
 3. 在面板切回 VPS 系统盘启动
 4. 正常开机
 
-### 重启黑屏 / GRUB 无法启动的修复（Superfloppy）
+### 手动引导：通过 GRUB 2 控制台启动（按 C）
 
-如果 `dd` 后虚拟机无法启动：
+如果 `dd` 后宿主 GRUB 菜单无法自动启动，可在 GRUB 2 菜单界面按 **`c`** 进入命令行，逐条输入以下命令手动引导：
 
-1. 进入救援系统
-2. 挂载根文件系统（Superfloppy 模式下是 `/dev/vda`，不是 `/dev/vda1`）
-3. 检查或重写 `/boot/grub/grub.cfg`
+```
+insmod part_msdos
+insmod ext2
+set root=(hd0,msdos1)
+linux /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0 console=tty0 console=ttyS0,115200
+initrd /boot/initramfs-linux.img
+boot
+```
 
-参考修复命令：
+### 进入系统后：重建引导配置
+
+手动引导进入系统后，重写 `/boot/grub/grub.cfg`：
 
 ```bash
-mount /dev/vda /mnt
-cat /mnt/boot/grub/grub.cfg          # 检查 grub.cfg 是否正确
-arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg   # 重新生成
+cat <<'EOF' > /boot/grub/grub.cfg
+set root=(hd0,msdos1)
+set timeout=1
+set default=0
+
+serial --speed=115200
+terminal_input serial console
+terminal_output serial console
+
+menuentry "Arch Linux" {
+    linux /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0 console=tty0 console=ttyS0,115200
+    initrd /boot/initramfs-linux.img
+}
+
+menuentry "Arch Linux (fallback)" {
+    linux /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0 console=tty0 console=ttyS0,115200
+    initrd /boot/initramfs-linux-fallback.img
+}
+EOF
+ln -sf grub /boot/grub2
+sync
+reboot
+```
+
+### 重启黑屏 / GRUB 无法启动的修复（救援系统）
+
+如果 `dd` 后虚拟机无法启动，可通过救援系统修复：
+
+```bash
+mount /dev/vda1 /mnt
+mkdir -p /mnt/boot/grub
+cat <<'EOF' > /mnt/boot/grub/grub.cfg
+set root=(hd0,msdos1)
+set timeout=1
+set default=0
+
+serial --speed=115200
+terminal_input serial console
+terminal_output serial console
+
+menuentry "Arch Linux" {
+    linux /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0 console=tty0 console=ttyS0,115200
+    initrd /boot/initramfs-linux.img
+}
+
+menuentry "Arch Linux (fallback)" {
+    linux /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0 console=tty0 console=ttyS0,115200
+    initrd /boot/initramfs-linux-fallback.img
+}
+EOF
+ln -sf grub /mnt/boot/grub2
+umount /mnt
 sync
 reboot
 ```
 
 ### 修复：启动后仅识别 5G 空间
 
-若系统已启动但根盘仍只有约 `5G`（镜像原始大小），需扩大文件系统。
-Superfloppy 模式无分区表，直接扩展文件系统即可：
+若系统已启动但根盘仍只有约 `5G`（镜像原始大小），需扩展分区并扩大文件系统：
+
+方式 1（推荐，使用 `growpart`）：
 
 ```bash
-resize2fs /dev/vda
+growpart /dev/vda 1
+resize2fs /dev/vda1
+```
+
+方式 2（无 `growpart` 时，使用 `parted`）：
+
+```bash
+parted -s /dev/vda "resizepart 1 100%"
+partprobe /dev/vda
+resize2fs /dev/vda1
 ```
 
 已知限制与排障：

@@ -13,11 +13,9 @@ function pre() {
   echo 'GRUB_TERMINAL="serial console"' >>"${MOUNT}/etc/default/grub"
   echo 'GRUB_SERIAL_COMMAND="serial --speed=115200"' >>"${MOUNT}/etc/default/grub"
 
-  # Write grub.cfg with serial console for CloudCone VNC/serial access.
-  mkdir -p "${MOUNT}/boot/grub"
+  # GRUB 2 config with serial console for CloudCone VNC/serial.
   cat <<'GRUBCFG' >"${MOUNT}/boot/grub/grub.cfg"
-insmod ext2
-set root=(hd0)
+set root=(hd0,msdos1)
 set timeout=1
 set default=0
 
@@ -26,15 +24,26 @@ terminal_input serial console
 terminal_output serial console
 
 menuentry "Arch Linux" {
-    linux /boot/vmlinuz-linux root=/dev/vda rw net.ifnames=0 console=tty0 console=ttyS0,115200
+    linux /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0 console=tty0 console=ttyS0,115200
     initrd /boot/initramfs-linux.img
 }
 
 menuentry "Arch Linux (fallback)" {
-    linux /boot/vmlinuz-linux root=/dev/vda rw net.ifnames=0 console=tty0 console=ttyS0,115200
+    linux /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0 console=tty0 console=ttyS0,115200
     initrd /boot/initramfs-linux-fallback.img
 }
 GRUBCFG
+
+  # Grub Legacy config with serial console.
+  cat <<'LEGACYCFG' >"${MOUNT}/boot/grub/grub.conf"
+default 0
+timeout 1
+
+title Arch Linux
+root (hd0,0)
+kernel /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0 console=tty0 console=ttyS0,115200
+initrd /boot/initramfs-linux.img
+LEGACYCFG
 }
 
 function post() {
