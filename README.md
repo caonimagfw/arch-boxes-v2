@@ -7,15 +7,22 @@ arch-boxes 提供面向 CloudCone `dd` 安装的 Arch Linux cloud raw 镜像构�
 ### Cloud Raw 镜像（标准 MBR 分区 + Debian 11 兼容 ext4）
 当前仓库仅保留 CloudCone / LinkCode 场景的 cloud 镜像产物链路。镜像预装 [`cloud-init`](https://cloud-init.io/)，使用 **标准 MBR 分区布局**（分区 1 起始于 2048 扇区） + Debian 11 兼容 ext4 文件系统。更多说明可参考 [ArchWiki: Arch Linux on a VPS](https://wiki.archlinux.org/title/Arch_Linux_on_a_VPS#Official_Arch_Linux_cloud_image)。
 
+本方案采用 **标准 MBR 分区方案**（分区 1 从 2048 扇区开始），并深度定制 ext4 文件系统特性以兼容 CloudCone 宿主 GRUB。
+
 #### 磁盘布局原理
 
-CloudCone 宿主 GRUB 为 CentOS/RHEL 8 版本（`GRUB 2.02-81.el8`），通过 `configfile` 方式读取客户盘引导配置，且固定使用 `(hd0,msdos1)` 作为根设备。
+CloudCone 宿主 GRUB 版本为 `GRUB 2.02-81.el8`。经过深入分析官方镜像，该版本 GRUB 虽然支持读取标准偏移的分区，但不支持现代 ext4 的 `64bit` (64位块寻址) 和 `metadata_csum` (元数据校验) 特性。
 
-经过验证，该版本 GRUB **完全支持** 读取起始偏移为 standard 1 MiB (2048 扇区) 的 ext4 分区。因此，本镜像采用标准的 MBR 分区表构建，具有最佳的兼容性和工具支持（如 `sfdisk`, `growpart` 等）。
+因此，我们在构建时精确禁用了这些不兼容特性：
+
+- **禁用**: `64bit`, `metadata_csum`, `metadata_csum_seed`, `orphan_file`
+- **启用**: `has_journal`, `ext_attr`, `resize_inode`, `dir_index`, `extent`, `flex_bg`, `sparse_super`, `large_file`, `huge_file`, `uninit_bg`, `dir_nlink`, `extra_isize`
+
+这样既保持了标准的分区表结构（方便 `sfdisk`/`growpart` 扩容），又完美兼容宿主引导器。
 
 镜像使用符号链接 `/boot/grub2` → `/boot/grub` 兼容 RHEL 路径约定，并同时提供 `grub.cfg`（GRUB 2）和 `grub.conf`（Grub Legacy）。不需要 `grub-install`（宿主提供引导器，我们只提供配置文件）。
 
-> **注意**：构建时使用 `debian11-mke2fs.conf` 控制 `mkfs.ext4`，避免 Arch 最新 e2fsprogs 默认启用的 `metadata_csum_seed` / `orphan_file` 等 incompat 特性导致宿主 GRUB 无法识别文件系统。
+> **注意**：构建时使用了显式的 `mkfs.ext4` 参数来匹配 CloudCone 官方镜像的特性，而非使用 `debian11-mke2fs.conf`。这确保了在 Arch Linux 较新版本的 e2fsprogs 环境下构建时，能够生成宿主 GRUB 兼容的 ext4 结构（禁用 `64bit`, `metadata_csum` 等）。
 
 ## 开发与构建
 
