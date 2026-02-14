@@ -45,20 +45,33 @@ trap cleanup EXIT
 
 # Create standard MBR partition table with partition 1 starting at sector 2048.
 # This aligns with standard practices and CloudCone's official images.
+#
+# If PREFORMATTED_IMAGE is set, use it directly (already partitioned + formatted
+# by Debian 11 container in CI). Otherwise, format locally with MKE2FS_CONFIG.
 function setup_disk() {
-  truncate -s "${DEFAULT_DISK_SIZE}" "${IMAGE}"
+  if [ -n "${PREFORMATTED_IMAGE:-}" ] && [ -f "${PREFORMATTED_IMAGE}" ]; then
+    echo "Using pre-formatted image: ${PREFORMATTED_IMAGE}"
+    cp "${PREFORMATTED_IMAGE}" "${IMAGE}"
+  else
+    echo "Creating and formatting image locally..."
+    truncate -s "${DEFAULT_DISK_SIZE}" "${IMAGE}"
 
-  # Create MBR partition table:
-  # Partition 1: start=2048, type=83 (Linux), bootable
-  echo 'start=2048, type=83, bootable' | sfdisk "${IMAGE}"
+    # Create MBR partition table:
+    # Partition 1: start=2048, type=83 (Linux), bootable
+    echo 'start=2048, type=83, bootable' | sfdisk "${IMAGE}"
 
-  # Map partition 1 (offset 2048 sectors = 1048576 bytes)
+    # Map partition 1 (offset 2048 sectors = 1048576 bytes)
+    LOOPDEV=$(losetup --offset 1048576 --find --show "${IMAGE}")
+
+    # Use CloudCone-compatible mke2fs.conf to override the build host's defaults.
+    # For best compatibility, prefer CI's Debian 11 container formatting (see workflow).
+    MKE2FS_CONFIG="${ORIG_PWD}/debian11-mke2fs.conf" mkfs.ext4 -F "${LOOPDEV}"
+    mount "${LOOPDEV}" "${MOUNT}"
+    return
+  fi
+
+  # Mount pre-formatted image's partition 1
   LOOPDEV=$(losetup --offset 1048576 --find --show "${IMAGE}")
-
-  # Use CloudCone-compatible mke2fs.conf to completely override the build host's
-  # default features. This ensures the ext4 filesystem has NO modern features
-  # (64bit, metadata_csum, etc.) that CloudCone's GRUB 2.02 cannot read.
-  MKE2FS_CONFIG="${ORIG_PWD}/debian11-mke2fs.conf" mkfs.ext4 -F "${LOOPDEV}"
   mount "${LOOPDEV}" "${MOUNT}"
 }
 

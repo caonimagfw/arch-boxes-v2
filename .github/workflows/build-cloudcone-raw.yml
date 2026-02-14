@@ -64,12 +64,50 @@ jobs:
             gh release delete "${TAG}" --repo "${REPO}" --cleanup-tag --yes
           fi
 
+      - name: Format disk image with Debian 11 e2fsprogs (GRUB compatibility)
+        run: |
+          set -euo pipefail
+          # Use Debian 11's e2fsprogs (1.46.2) to create the ext4 filesystem.
+          # This ensures binary-level compatibility with CloudCone's host GRUB (2.02-81.el8),
+          # which cannot read ext4 features produced by newer e2fsprogs versions.
+          sudo docker run --rm --privileged \
+            -v /dev:/dev \
+            -v "${PWD}:/workspace" \
+            -w /workspace \
+            debian:11 \
+            bash -c '
+              set -euo pipefail
+              apt-get update -qq && apt-get install -y -qq e2fsprogs fdisk >/dev/null 2>&1
+
+              echo "=== Debian 11 e2fsprogs version ==="
+              mkfs.ext4 -V 2>&1 || true
+
+              IMAGE=/workspace/preformatted.img
+              truncate -s 5G "${IMAGE}"
+
+              # Create standard MBR partition table (start=2048, matching CloudCone official images)
+              echo "start=2048, type=83, bootable" | sfdisk "${IMAGE}"
+
+              # Setup loop device for partition 1 (offset 1MiB = 1048576 bytes)
+              LOOPDEV=$(losetup --offset 1048576 --find --show "${IMAGE}")
+
+              # Format ext4 using our custom mke2fs.conf (disables 64bit/metadata_csum)
+              MKE2FS_CONFIG=/workspace/debian11-mke2fs.conf mkfs.ext4 -F "${LOOPDEV}"
+
+              echo "=== Filesystem features ==="
+              tune2fs -l "${LOOPDEV}" | grep -E "features|Inode size|Block size"
+
+              losetup -d "${LOOPDEV}"
+              echo "Pre-formatted image created successfully."
+            '
+
       - name: Build cloud-image raw in privileged Arch container
         run: |
           set -euo pipefail
           sudo docker run --rm --privileged \
             -v /dev:/dev \
             -e "IMAGE_FILTER=${IMAGE_FILTER}" \
+            -e "PREFORMATTED_IMAGE=/workspace/preformatted.img" \
             -v "${PWD}:/workspace" \
             -w /workspace \
             archlinux:latest \

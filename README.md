@@ -13,7 +13,12 @@ arch-boxes 提供面向 CloudCone `dd` 安装的 Arch Linux cloud raw 镜像构�
 
 CloudCone 宿主 GRUB 版本为 `GRUB 2.02-81.el8`。经过深入分析官方镜像，该版本 GRUB 虽然支持读取标准偏移的分区，但不支持现代 ext4 的 `64bit` (64位块寻址) 和 `metadata_csum` (元数据校验) 特性。
 
-因此，构建时使用 `debian11-mke2fs.conf` 配置文件（通过 `MKE2FS_CONFIG` 环境变量完全覆盖构建主机的默认配置），精确控制 ext4 特性：
+因此，CI 构建流程采用 **混合容器方案**：
+
+1. **Debian 11 容器**：使用 Debian 11 的 `e2fsprogs 1.46.2` 执行磁盘分区和 ext4 格式化，确保文件系统的二进制结构与 CloudCone 官方镜像完全一致。
+2. **Arch Linux 容器**：使用预格式化的镜像文件，执行 `pacstrap` 安装系统和后续配置。
+
+通过 `MKE2FS_CONFIG` 环境变量加载 `debian11-mke2fs.conf`，精确控制 ext4 特性：
 
 - **禁用**: `64bit`, `metadata_csum`, `metadata_csum_seed`, `orphan_file`
 - **启用**: `has_journal`, `ext_attr`, `resize_inode`, `dir_index`, `extent`, `flex_bg`, `sparse_super`, `large_file`, `huge_file`, `uninit_bg`, `dir_nlink`, `extra_isize`
@@ -22,7 +27,7 @@ CloudCone 宿主 GRUB 版本为 `GRUB 2.02-81.el8`。经过深入分析官方镜
 
 镜像使用符号链接 `/boot/grub2` → `/boot/grub` 兼容 RHEL 路径约定，并同时提供 `grub.cfg`（GRUB 2）和 `grub.conf`（Grub Legacy）。不需要 `grub-install`（宿主提供引导器，我们只提供配置文件）。
 
-> **注意**：构建时使用 `debian11-mke2fs.conf` 控制 `mkfs.ext4`（通过 `MKE2FS_CONFIG` 环境变量），完全隔离构建主机的 e2fsprogs 默认配置。这确保了无论 Arch Linux 的 e2fsprogs 版本多新，格式化出的 ext4 始终只包含我们指定的特性集。
+> **注意**：CI 使用 `debian:11` 容器格式化磁盘，确保 `mkfs.ext4` 二进制与 CloudCone 官方镜像一致（e2fsprogs 1.46.2）。本地构建时，如没有 Debian 11 环境，`build.sh` 会回退使用 `debian11-mke2fs.conf` 配置文件控制 Arch 宿主机的 `mkfs.ext4`。
 
 ## 开发与构建
 
