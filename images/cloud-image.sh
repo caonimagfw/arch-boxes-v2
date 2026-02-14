@@ -14,7 +14,9 @@ function pre() {
   echo 'GRUB_SERIAL_COMMAND="serial --speed=115200"' >>"${MOUNT}/etc/default/grub"
 
   # GRUB 2 config with serial console for CloudCone VNC/serial.
-  cat <<'GRUBCFG' >"${MOUNT}/boot/grub/grub.cfg"
+  # The host expects /boot/grub2/grub.cfg.
+  mkdir -p "${MOUNT}/boot/grub2"
+  cat <<'GRUBCFG' >"${MOUNT}/boot/grub2/grub.cfg"
 set root=(hd0,msdos1)
 set timeout=1
 set default=0
@@ -33,6 +35,10 @@ menuentry "Arch Linux (fallback)" {
     initrd /boot/initramfs-linux-fallback.img
 }
 GRUBCFG
+  
+  # Ensure /boot/grub/grub.cfg also exists as a symlink or file, just in case
+  mkdir -p "${MOUNT}/boot/grub"
+  ln -sf ../grub2/grub.cfg "${MOUNT}/boot/grub/grub.cfg"
 
   # Grub Legacy config with serial console.
   cat <<'LEGACYCFG' >"${MOUNT}/boot/grub/grub.conf"

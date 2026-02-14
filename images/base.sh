@@ -67,7 +67,7 @@ EOF
   #   Legacy:    set root=(hd0,msdos1); legacy_configfile /boot/grub/grub.conf
   #
   # No grub-install needed. We write static configs with correct device paths.
-  # Arch's /boot/grub/ is symlinked to /boot/grub2/ for RHEL host compatibility.
+  # We create the real file at /boot/grub2/grub.cfg as expected by the host.
 
   # Configure /etc/default/grub for future 'grub-mkconfig' on the live VPS.
   sed -i 's/^GRUB_TIMEOUT=.*$/GRUB_TIMEOUT=1/' "${MOUNT}/etc/default/grub"
@@ -77,8 +77,8 @@ EOF
   echo 'GRUB_DISABLE_LINUX_PARTUUID=true' >>"${MOUNT}/etc/default/grub"
 
   # GRUB 2 config — cloud-image.sh will overwrite with serial console.
-  mkdir -p "${MOUNT}/boot/grub"
-  cat <<'GRUBCFG' >"${MOUNT}/boot/grub/grub.cfg"
+  mkdir -p "${MOUNT}/boot/grub2"
+  cat <<'GRUBCFG' >"${MOUNT}/boot/grub2/grub.cfg"
 set root=(hd0,msdos1)
 set timeout=1
 set default=0
@@ -94,8 +94,10 @@ menuentry "Arch Linux (fallback)" {
 }
 GRUBCFG
 
-  # Symlink: /boot/grub2 → /boot/grub (RHEL host expects /boot/grub2/)
-  ln -sf grub "${MOUNT}/boot/grub2"
+  # Symlink: /boot/grub → /boot/grub2 (Arch expects /boot/grub, RHEL host expects /boot/grub2)
+  # But we just created the file in grub2. Let's make sure both paths work.
+  rm -rf "${MOUNT}/boot/grub"
+  ln -sf grub2 "${MOUNT}/boot/grub"
 
   # Grub Legacy config for host's fallback "Grub Legacy" option.
   cat <<'LEGACYCFG' >"${MOUNT}/boot/grub/grub.conf"
