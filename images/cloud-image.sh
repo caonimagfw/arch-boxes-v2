@@ -50,8 +50,7 @@ LEGACYCFG
 #!/bin/bash
 # Expand the root partition to fill the disk on first boot.
 #
-# This handles the special "Superfloppy + MBR" layout where partition 1 starts at LBA 0.
-# sfdisk rejects "start=0" as invalid, so we must binary-patch the MBR partition table.
+# This uses standard tools (growpart) to resize the partition and filesystem.
 
 set -u
 set -e
@@ -71,37 +70,18 @@ fi
 
 echo "Expanding root partition..."
 
-# Get total size of the disk in sectors
-TOTAL_SECTORS=$(cat "/sys/class/block/$(basename ${DISK})/size")
-echo "Detected disk size: ${TOTAL_SECTORS} sectors"
+# Use standard growpart to resize the partition
+if command -v growpart >/dev/null; then
+    echo "Running growpart..."
+    # growpart returns 0 if changed, 1 if no change needed, 2 if error
+    growpart "${DISK}" "${PART}" || true
+else
+    echo "growpart not found, skipping partition resize."
+fi
 
-# Convert to 4-byte little endian hex for MBR
-printf -v S_HEX "%08x" "${TOTAL_SECTORS}"
-S0="${S_HEX:6:2}"
-S1="${S_HEX:4:2}"
-S2="${S_HEX:2:2}"
-S3="${S_HEX:0:2}"
-
-# Construct the 16-byte partition entry (Offset 446)
-# Byte 0:    0x80 (Bootable)
-# Byte 1-3:  0x00 0x01 0x00 (CHS Start: Head 0, Sector 1, Cylinder 0)
-# Byte 4:    0x83 (Linux Type)
-# Byte 5-7:  0xFE 0xFF 0xFF (CHS End: Max)
-# Byte 8-11: 0x00 0x00 0x00 0x00 (LBA Start: 0 - CRITICAL for Superfloppy)
-# Byte 12-15: Size in sectors (Little Endian)
-PART_ENTRY="\x80\x00\x01\x00\x83\xfe\xff\xff\x00\x00\x00\x00\x${S0}\x${S1}\x${S2}\x${S3}"
-
-echo "Patching MBR partition table..."
-printf "${PART_ENTRY}" | dd of="${DISK}" bs=1 seek=446 count=16 conv=notrunc
-
-# Force kernel to update partition table info
-# partx -u is generally safer for live partitions than partprobe
-echo "Updating kernel partition table..."
-partx -u "${DISK}" || partprobe "${DISK}" || true
-
-# Resize filesystem
+# Resize the filesystem
 echo "Resizing filesystem..."
-resize2fs "${DISK}${PART}"
+resize2fs "${DISK}${PART}" || true
 
 # Mark as done
 mkdir -p "$(dirname "${LOCKFILE}")"

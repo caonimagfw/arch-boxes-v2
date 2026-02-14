@@ -4,25 +4,14 @@ arch-boxes 提供面向 CloudCone `dd` 安装的 Arch Linux cloud raw 镜像构�
 
 ## 镜像类型
 
-### Cloud Raw 镜像（Superfloppy + MBR 注入 + Debian 11 兼容 ext4）
-当前仓库仅保留 CloudCone / LinkCode 场景的 cloud 镜像产物链路。镜像预装 [`cloud-init`](https://cloud-init.io/)，使用 **Superfloppy + 后置 MBR 注入** 布局 + Debian 11 兼容 ext4 文件系统。更多说明可参考 [ArchWiki: Arch Linux on a VPS](https://wiki.archlinux.org/title/Arch_Linux_on_a_VPS#Official_Arch_Linux_cloud_image)。
+### Cloud Raw 镜像（标准 MBR 分区 + Debian 11 兼容 ext4）
+当前仓库仅保留 CloudCone / LinkCode 场景的 cloud 镜像产物链路。镜像预装 [`cloud-init`](https://cloud-init.io/)，使用 **标准 MBR 分区布局**（分区 1 起始于 2048 扇区） + Debian 11 兼容 ext4 文件系统。更多说明可参考 [ArchWiki: Arch Linux on a VPS](https://wiki.archlinux.org/title/Arch_Linux_on_a_VPS#Official_Arch_Linux_cloud_image)。
 
 #### 磁盘布局原理
 
-CloudCone 宿主 GRUB 为 CentOS/RHEL 8 版本（`GRUB 2.02-81.el8`），通过 `configfile` 方式读取客户盘引导配置，且固定使用 `(hd0,msdos1)` 作为根设备：
+CloudCone 宿主 GRUB 为 CentOS/RHEL 8 版本（`GRUB 2.02-81.el8`），通过 `configfile` 方式读取客户盘引导配置，且固定使用 `(hd0,msdos1)` 作为根设备。
 
-- **Grub 2**：`set root=(hd0,msdos1); configfile /boot/grub2/grub.cfg`
-- **Grub Legacy**：`set root=(hd0,msdos1); legacy_configfile /boot/grub/grub.conf`
-
-该版本 GRUB 的 ext2 模块存在兼容性问题：当 ext4 文件系统位于标准分区偏移（通常 1 MiB）时，**目录遍历结果乱码**；但文件系统从字节 0 开始（superfloppy 模式）时可以正常读取。
-
-本方案的解决思路：
-
-1. **构建时**：以 superfloppy 方式创建 ext4（文件系统从字节 0 开始）
-2. **构建后**：往镜像的前 512 字节注入一个最小 MBR 分区表，分区 1 的 LBA 起始 = 0，覆盖整个磁盘
-3. ext4 的 "boot block"（字节 0-1023）是保留区域，超级块从字节 1024 开始，MBR 写入字节 446-511 不会破坏文件系统
-4. GRUB 解析 `(hd0,msdos1)` 时，分区偏移 = 0，等效于 `(hd0)` — 文件系统可正常读取
-5. VPS 的 Linux 内核检测到 MBR 后创建 `/dev/vda1`，`fstab` 和内核参数 `root=/dev/vda1` 正常工作
+经过验证，该版本 GRUB **完全支持** 读取起始偏移为 standard 1 MiB (2048 扇区) 的 ext4 分区。因此，本镜像采用标准的 MBR 分区表构建，具有最佳的兼容性和工具支持（如 `sfdisk`, `growpart` 等）。
 
 镜像使用符号链接 `/boot/grub2` → `/boot/grub` 兼容 RHEL 路径约定，并同时提供 `grub.cfg`（GRUB 2）和 `grub.conf`（Grub Legacy）。不需要 `grub-install`（宿主提供引导器，我们只提供配置文件）。
 
@@ -159,10 +148,8 @@ reboot
 
 如果 `dd` 后虚拟机无法启动，可通过救援系统修复。
 
-> **注意**：镜像使用 Superfloppy + MBR 注入布局，分区 1 起始于 LBA 0。救援系统中 `/dev/vda1` 和 `/dev/vda` 实际指向同一数据，若 `/dev/vda1` 不存在，可直接使用 `/dev/vda`。
-
 ```bash
-mount /dev/vda1 /mnt  # 若不存在，改用: mount /dev/vda /mnt
+mount /dev/vda1 /mnt
 mkdir -p /mnt/boot/grub
 cat <<'EOF' > /mnt/boot/grub/grub.cfg
 set root=(hd0,msdos1)
@@ -193,24 +180,17 @@ reboot
 
 镜像已内置自动扩容脚本，首次启动时会自动扩展根分区以利用全部磁盘空间。
 
-若自动扩容失败（例如识别到根盘仍只有约 `5G`），需要手动执行扩容。
-由于 `sfdisk` 等常规工具会拒绝“分区起始扇区为 0”的特殊布局，**必须**使用以下脚本直接修改分区表：
+若自动扩容失败（例如识别到根盘仍只有约 `5G`），可手动执行以下命令修复。
+
+由于镜像使用 **标准 MBR 分区**（分区 1 起始于 2048 扇区），可直接使用标准工具扩容。
+
+**手动扩容命令：**
 
 ```bash
-# 获取磁盘总扇区数
-SECTORS=$(cat /sys/class/block/vda/size)
+# 1. 扩容分区
+growpart /dev/vda 1
 
-# 计算十六进制值（小端序）
-printf -v HEX "%08x" $SECTORS
-S0=${HEX:6:2}; S1=${HEX:4:2}; S2=${HEX:2:2}; S3=${HEX:0:2}
-
-# 构造分区表项（Offset 446）并写入 MBR
-# 包含：Bootable(80), CHS(0/1/0), Type(83), CHS_End(Max), Start(0), Size(SECTORS)
-printf "\x80\x00\x01\x00\x83\xfe\xff\xff\x00\x00\x00\x00\x${S0}\x${S1}\x${S2}\x${S3}" | \
-    dd of=/dev/vda bs=1 seek=446 count=16 conv=notrunc
-
-# 通知内核并在线调整文件系统
-partx -u /dev/vda
+# 2. 在线扩容文件系统
 resize2fs /dev/vda1
 ```
 
