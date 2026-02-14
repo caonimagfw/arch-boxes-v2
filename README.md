@@ -193,16 +193,24 @@ reboot
 
 镜像已内置自动扩容脚本，首次启动时会自动扩展根分区以利用全部磁盘空间。
 
-若自动扩容失败（例如识别到根盘仍只有约 `5G`），可手动执行以下命令修复。
-
-注意：由于镜像使用 Superfloppy + MBR 注入布局（分区 1 起始于 LBA 0），**必须确保分区起始位置为 0**，否则会导致系统无法启动。
-
-手动扩容命令：
+若自动扩容失败（例如识别到根盘仍只有约 `5G`），需要手动执行扩容。
+由于 `sfdisk` 等常规工具会拒绝“分区起始扇区为 0”的特殊布局，**必须**使用以下脚本直接修改分区表：
 
 ```bash
-# 强制分区 1 从 0 开始并覆盖全盘
-echo '0,,83,*' | sfdisk --force /dev/vda
-partprobe /dev/vda
+# 获取磁盘总扇区数
+SECTORS=$(cat /sys/class/block/vda/size)
+
+# 计算十六进制值（小端序）
+printf -v HEX "%08x" $SECTORS
+S0=${HEX:6:2}; S1=${HEX:4:2}; S2=${HEX:2:2}; S3=${HEX:0:2}
+
+# 构造分区表项（Offset 446）并写入 MBR
+# 包含：Bootable(80), CHS(0/1/0), Type(83), CHS_End(Max), Start(0), Size(SECTORS)
+printf "\x80\x00\x01\x00\x83\xfe\xff\xff\x00\x00\x00\x00\x${S0}\x${S1}\x${S2}\x${S3}" | \
+    dd of=/dev/vda bs=1 seek=446 count=16 conv=notrunc
+
+# 通知内核并在线调整文件系统
+partx -u /dev/vda
 resize2fs /dev/vda1
 ```
 

@@ -51,39 +51,56 @@ LEGACYCFG
 # Expand the root partition to fill the disk on first boot.
 #
 # This handles the special "Superfloppy + MBR" layout where partition 1 starts at LBA 0.
-# Standard tools like growpart may fail with this layout or try to move the start sector.
-# We force sfdisk to keep start=0.
+# sfdisk rejects "start=0" as invalid, so we must binary-patch the MBR partition table.
 
 set -u
+set -e
 
 LOCKFILE="/var/lib/arch-boxes/expand-root-done"
+DISK="/dev/vda"
+PART="1"
 
 if [ -f "${LOCKFILE}" ]; then
     exit 0
 fi
-
-echo "Expanding root partition..."
-
-# Target device (usually /dev/vda)
-DISK="/dev/vda"
-PART="1"
 
 if [ ! -b "${DISK}" ]; then
     echo "Device ${DISK} not found, skipping expansion."
     exit 0
 fi
 
-# Force partition 1 to start at 0 and take all space.
-# 0x83 is Linux. * means bootable.
-# Format: start, size, type, bootable
-# start=0 is CRITICAL for this layout.
-echo '0,,83,*' | sfdisk --force "${DISK}"
+echo "Expanding root partition..."
 
-# Inform kernel of partition table changes
-# Note: partprobe might return error if partition is in use, but size update usually works.
-partprobe "${DISK}" || true
+# Get total size of the disk in sectors
+TOTAL_SECTORS=$(cat "/sys/class/block/$(basename ${DISK})/size")
+echo "Detected disk size: ${TOTAL_SECTORS} sectors"
 
-# Resize the filesystem
+# Convert to 4-byte little endian hex for MBR
+printf -v S_HEX "%08x" "${TOTAL_SECTORS}"
+S0="${S_HEX:6:2}"
+S1="${S_HEX:4:2}"
+S2="${S_HEX:2:2}"
+S3="${S_HEX:0:2}"
+
+# Construct the 16-byte partition entry (Offset 446)
+# Byte 0:    0x80 (Bootable)
+# Byte 1-3:  0x00 0x01 0x00 (CHS Start: Head 0, Sector 1, Cylinder 0)
+# Byte 4:    0x83 (Linux Type)
+# Byte 5-7:  0xFE 0xFF 0xFF (CHS End: Max)
+# Byte 8-11: 0x00 0x00 0x00 0x00 (LBA Start: 0 - CRITICAL for Superfloppy)
+# Byte 12-15: Size in sectors (Little Endian)
+PART_ENTRY="\x80\x00\x01\x00\x83\xfe\xff\xff\x00\x00\x00\x00\x${S0}\x${S1}\x${S2}\x${S3}"
+
+echo "Patching MBR partition table..."
+printf "${PART_ENTRY}" | dd of="${DISK}" bs=1 seek=446 count=16 conv=notrunc
+
+# Force kernel to update partition table info
+# partx -u is generally safer for live partitions than partprobe
+echo "Updating kernel partition table..."
+partx -u "${DISK}" || partprobe "${DISK}" || true
+
+# Resize filesystem
+echo "Resizing filesystem..."
 resize2fs "${DISK}${PART}"
 
 # Mark as done
