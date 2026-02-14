@@ -99,6 +99,45 @@ function image_cleanup() {
   fstrim --verbose "${MOUNT}"
 }
 
+# Force-disable ext4 features that GRUB 2.02 (CloudCone host) cannot read.
+#
+# Why: Even though mkfs.ext4 uses our restricted mke2fs.conf, subsequent
+# operations (pacstrap, pacman hooks, mkinitcpio, e2fsprogs upgrades, or
+# fstrim on offset loop devices) can silently re-enable features like
+# dir_index, metadata_csum, 64bit, orphan_file, etc.
+# This function is the final safety net — runs on the unmounted device
+# right before compression, guaranteeing GRUB 2.02 compatibility.
+#
+# $1 — raw image file path
+function sanitize_ext4() {
+  local img="${1}"
+  local dev
+
+  dev=$(losetup --offset 1048576 --find --show "${img}")
+
+  echo "=== [ext4-sanitize] Features BEFORE ==="
+  tune2fs -l "${dev}" 2>/dev/null | grep -iE "features|Filesystem revision"
+
+  # Disable every feature known to break GRUB 2.02.
+  # ^dir_index        — htree directory hashes unreadable by GRUB 2.02
+  # ^metadata_csum    — checksummed metadata unsupported
+  # ^metadata_csum_seed — seed variant of above
+  # ^64bit            — 64-bit block addressing unsupported
+  # ^orphan_file      — orphan file inode feature (e2fsprogs ≥1.47)
+  # ^large_dir        — large directory feature
+  tune2fs -O ^dir_index,^metadata_csum,^metadata_csum_seed,^64bit,^orphan_file,^large_dir \
+    "${dev}" 2>/dev/null || true
+
+  # Rebuild directory structures (convert htree back to linear) and fix
+  # any inconsistencies introduced by feature removal.
+  e2fsck -fy "${dev}" 2>/dev/null || true
+
+  echo "=== [ext4-sanitize] Features AFTER ==="
+  tune2fs -l "${dev}" 2>/dev/null | grep -iE "features|Filesystem revision"
+
+  losetup -d "${dev}"
+}
+
 # Mount image helper (loop device + mount) — partition 1 offset
 function mount_image() {
   # Mount partition 1 (offset 2048 sectors = 1048576 bytes)
@@ -169,6 +208,7 @@ function create_image() {
   "${2}"
   image_cleanup
   unmount_image
+  sanitize_ext4 "${tmp_image}"
   "${3}" "${tmp_image}" "${1}"
   mv_to_output "${1}"
 }
@@ -193,6 +233,7 @@ function main() {
   source "${ORIG_PWD}/images/base.sh"
   pre
   unmount_image
+  sanitize_ext4 "${IMAGE}"
 
   local build_version
   if [ -z "${1:-}" ]; then
