@@ -55,13 +55,10 @@ function setup_disk() {
   # Map partition 1 (offset 2048 sectors = 1048576 bytes)
   LOOPDEV=$(losetup --offset 1048576 --find --show "${IMAGE}")
 
-  # Use explicit mkfs.ext4 features to match CloudCone's official image exactly.
-  # This ensures compatibility with the host's older GRUB (2.02) which cannot read
-  # modern ext4 features like 'metadata_csum' or '64bit' when using standard partitions.
-  #
-  # Features enabled: has_journal,ext_attr,resize_inode,dir_index,filetype,extent,flex_bg,sparse_super,large_file,huge_file,uninit_bg,dir_nlink,extra_isize
-  # Features DISABLED (^): 64bit,metadata_csum,metadata_csum_seed,orphan_file
-  mkfs.ext4 -F -O "^64bit,^metadata_csum,^metadata_csum_seed,^orphan_file,has_journal,ext_attr,resize_inode,dir_index,filetype,extent,flex_bg,sparse_super,large_file,huge_file,uninit_bg,dir_nlink,extra_isize" "${LOOPDEV}"
+  # Use CloudCone-compatible mke2fs.conf to completely override the build host's
+  # default features. This ensures the ext4 filesystem has NO modern features
+  # (64bit, metadata_csum, etc.) that CloudCone's GRUB 2.02 cannot read.
+  MKE2FS_CONFIG="${ORIG_PWD}/debian11-mke2fs.conf" mkfs.ext4 -F "${LOOPDEV}"
   mount "${LOOPDEV}" "${MOUNT}"
 }
 

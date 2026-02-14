@@ -13,7 +13,7 @@ arch-boxes 提供面向 CloudCone `dd` 安装的 Arch Linux cloud raw 镜像构�
 
 CloudCone 宿主 GRUB 版本为 `GRUB 2.02-81.el8`。经过深入分析官方镜像，该版本 GRUB 虽然支持读取标准偏移的分区，但不支持现代 ext4 的 `64bit` (64位块寻址) 和 `metadata_csum` (元数据校验) 特性。
 
-因此，我们在构建时精确禁用了这些不兼容特性：
+因此，构建时使用 `debian11-mke2fs.conf` 配置文件（通过 `MKE2FS_CONFIG` 环境变量完全覆盖构建主机的默认配置），精确控制 ext4 特性：
 
 - **禁用**: `64bit`, `metadata_csum`, `metadata_csum_seed`, `orphan_file`
 - **启用**: `has_journal`, `ext_attr`, `resize_inode`, `dir_index`, `extent`, `flex_bg`, `sparse_super`, `large_file`, `huge_file`, `uninit_bg`, `dir_nlink`, `extra_isize`
@@ -22,7 +22,7 @@ CloudCone 宿主 GRUB 版本为 `GRUB 2.02-81.el8`。经过深入分析官方镜
 
 镜像使用符号链接 `/boot/grub2` → `/boot/grub` 兼容 RHEL 路径约定，并同时提供 `grub.cfg`（GRUB 2）和 `grub.conf`（Grub Legacy）。不需要 `grub-install`（宿主提供引导器，我们只提供配置文件）。
 
-> **注意**：构建时使用了显式的 `mkfs.ext4` 参数来匹配 CloudCone 官方镜像的特性，而非使用 `debian11-mke2fs.conf`。这确保了在 Arch Linux 较新版本的 e2fsprogs 环境下构建时，能够生成宿主 GRUB 兼容的 ext4 结构（禁用 `64bit`, `metadata_csum` 等）。
+> **注意**：构建时使用 `debian11-mke2fs.conf` 控制 `mkfs.ext4`（通过 `MKE2FS_CONFIG` 环境变量），完全隔离构建主机的 e2fsprogs 默认配置。这确保了无论 Arch Linux 的 e2fsprogs 版本多新，格式化出的 ext4 始终只包含我们指定的特性集。
 
 ## 开发与构建
 
