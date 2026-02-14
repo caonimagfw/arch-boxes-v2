@@ -21,23 +21,10 @@ function pre() {
   arch-chroot "${MOUNT}" /usr/bin/systemd-firstboot --locale=C.UTF-8 --timezone=UTC --hostname=archlinux --keymap=us
   ln -sf /run/systemd/resolve/stub-resolv.conf "${MOUNT}/etc/resolv.conf"
 
-  # Setup pacman-init.service for clean pacman keyring initialization
-  cat <<EOF >"${MOUNT}/etc/systemd/system/pacman-init.service"
-[Unit]
-Description=Initializes Pacman keyring
-Before=sshd.service cloud-final.service archlinux-keyring-wkd-sync.service
-After=time-sync.target
-ConditionFirstBoot=yes
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/bin/pacman-key --init
-ExecStart=/usr/bin/pacman-key --populate
-
-[Install]
-WantedBy=multi-user.target
-EOF
+  # Initialize pacman keyring inside the image
+  # This ensures pacman is ready to use immediately after booting/flashing
+  arch-chroot "${MOUNT}" /usr/bin/pacman-key --init
+  arch-chroot "${MOUNT}" /usr/bin/pacman-key --populate archlinux
 
   # Setup mirror list to worldwide mirrors
   cat <<'EOF' >"${MOUNT}/etc/pacman.d/mirrorlist"
@@ -53,7 +40,6 @@ systemctl enable systemd-networkd
 systemctl enable systemd-resolved
 systemctl enable systemd-timesyncd
 systemctl enable systemd-time-wait-sync
-systemctl enable pacman-init.service
 EOF
 
   # Default access policy for cloud builds: keep root and allow password login.

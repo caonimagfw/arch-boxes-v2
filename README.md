@@ -189,24 +189,19 @@ sync
 reboot
 ```
 
-### 修复：启动后仅识别 5G 空间
+### 自动扩容
 
-若系统已启动但根盘仍只有约 `5G`（镜像原始大小），需扩展分区和文件系统。
+镜像已内置自动扩容脚本，首次启动时会自动扩展根分区以利用全部磁盘空间。
 
-由于镜像使用 Superfloppy + MBR 注入布局（分区 1 起始于 LBA 0），扩展方式如下：
+若自动扩容失败（例如识别到根盘仍只有约 `5G`），可手动执行以下命令修复。
 
-方式 1（推荐，使用 `growpart`）：
+注意：由于镜像使用 Superfloppy + MBR 注入布局（分区 1 起始于 LBA 0），**必须确保分区起始位置为 0**，否则会导致系统无法启动。
 
-```bash
-growpart /dev/vda 1
-resize2fs /dev/vda1
-```
-
-方式 2（无 `growpart` 时，使用 `sfdisk` 重写分区表）：
+手动扩容命令：
 
 ```bash
-# 删除旧分区并重建覆盖全盘的分区（数据不变，只改分区表）
-echo ',,L,*' | sfdisk --force /dev/vda
+# 强制分区 1 从 0 开始并覆盖全盘
+echo '0,,83,*' | sfdisk --force /dev/vda
 partprobe /dev/vda
 resize2fs /dev/vda1
 ```
