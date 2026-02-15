@@ -13,7 +13,7 @@ function pre() {
   # Swap
   mkdir -p "${MOUNT}/swap"
   chmod 0700 "${MOUNT}/swap"
-  dd if=/dev/zero of="${MOUNT}/swap/swapfile" bs=1M count=1024 status=none
+  dd if=/dev/zero of="${MOUNT}/swap/swapfile" bs=1M count=2048 status=none
   chmod 0600 "${MOUNT}/swap/swapfile"
   mkswap "${MOUNT}/swap/swapfile" >/dev/null
   echo "/swap/swapfile none swap defaults 0 0" >>"${MOUNT}/etc/fstab"
@@ -21,10 +21,23 @@ function pre() {
   arch-chroot "${MOUNT}" /usr/bin/systemd-firstboot --locale=C.UTF-8 --timezone=UTC --hostname=archlinux --keymap=us
   ln -sf /run/systemd/resolve/stub-resolv.conf "${MOUNT}/etc/resolv.conf"
 
-  # Initialize pacman keyring inside the image
-  # This ensures pacman is ready to use immediately after booting/flashing
-  arch-chroot "${MOUNT}" /usr/bin/pacman-key --init
-  arch-chroot "${MOUNT}" /usr/bin/pacman-key --populate archlinux
+  # Setup pacman-init.service for clean pacman keyring initialization
+  cat <<EOF >"${MOUNT}/etc/systemd/system/pacman-init.service"
+[Unit]
+Description=Initializes Pacman keyring
+Before=sshd.service cloud-final.service archlinux-keyring-wkd-sync.service
+After=time-sync.target
+ConditionFirstBoot=yes
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/pacman-key --init
+ExecStart=/usr/bin/pacman-key --populate
+
+[Install]
+WantedBy=multi-user.target
+EOF
 
   # Setup mirror list to worldwide mirrors
   cat <<'EOF' >"${MOUNT}/etc/pacman.d/mirrorlist"
@@ -40,6 +53,7 @@ systemctl enable systemd-networkd
 systemctl enable systemd-resolved
 systemctl enable systemd-timesyncd
 systemctl enable systemd-time-wait-sync
+systemctl enable pacman-init.service
 EOF
 
   # Default access policy for cloud builds: keep root and allow password login.
@@ -67,7 +81,7 @@ EOF
   #   Legacy:    set root=(hd0,msdos1); legacy_configfile /boot/grub/grub.conf
   #
   # No grub-install needed. We write static configs with correct device paths.
-  # We create the real file at /boot/grub2/grub.cfg as expected by the host.
+  # Real files in /boot/grub2/ (host reads this); /boot/grub is a symlink to grub2.
 
   # Configure /etc/default/grub for future 'grub-mkconfig' on the live VPS.
   sed -i 's/^GRUB_TIMEOUT=.*$/GRUB_TIMEOUT=1/' "${MOUNT}/etc/default/grub"
@@ -77,6 +91,8 @@ EOF
   echo 'GRUB_DISABLE_LINUX_PARTUUID=true' >>"${MOUNT}/etc/default/grub"
 
   # GRUB 2 config — cloud-image.sh will overwrite with serial console.
+  # Real file at /boot/grub2/grub.cfg (host GRUB reads this path).
+  # /boot/grub is a symlink to grub2 so Arch tools also work.
   mkdir -p "${MOUNT}/boot/grub2"
   cat <<'GRUBCFG' >"${MOUNT}/boot/grub2/grub.cfg"
 set root=(hd0,msdos1)
@@ -94,13 +110,12 @@ menuentry "Arch Linux (fallback)" {
 }
 GRUBCFG
 
-  # Symlink: /boot/grub → /boot/grub2 (Arch expects /boot/grub, RHEL host expects /boot/grub2)
-  # But we just created the file in grub2. Let's make sure both paths work.
+  # Symlink: /boot/grub → /boot/grub2 (Arch expects /boot/grub/)
   rm -rf "${MOUNT}/boot/grub"
   ln -sf grub2 "${MOUNT}/boot/grub"
 
   # Grub Legacy config for host's fallback "Grub Legacy" option.
-  cat <<'LEGACYCFG' >"${MOUNT}/boot/grub/grub.conf"
+  cat <<'LEGACYCFG' >"${MOUNT}/boot/grub2/grub.conf"
 default 0
 timeout 1
 

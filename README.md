@@ -4,25 +4,29 @@ arch-boxes 提供面向 CloudCone `dd` 安装的 Arch Linux cloud raw 镜像构�
 
 ## 镜像类型
 
-### Cloud Raw 镜像（标准 MBR 分区 + Debian 11 兼容 ext4）
-当前仓库仅保留 CloudCone / LinkCode 场景的 cloud 镜像产物链路。镜像预装 [`cloud-init`](https://cloud-init.io/)，使用 **标准 MBR 分区布局**（分区 1 起始于 2048 扇区） + Debian 11 兼容 ext4 文件系统。更多说明可参考 [ArchWiki: Arch Linux on a VPS](https://wiki.archlinux.org/title/Arch_Linux_on_a_VPS#Official_Arch_Linux_cloud_image)。
-
-本方案采用 **标准 MBR 分区方案**（分区 1 从 2048 扇区开始），并深度定制 ext4 文件系统特性以兼容 CloudCone 宿主 GRUB。
+### Cloud Raw 镜像（Superfloppy + MBR 注入 + Debian 11 兼容 ext4）
+当前仓库仅保留 CloudCone / LinkCode 场景的 cloud 镜像产物链路。镜像预装 [`cloud-init`](https://cloud-init.io/)，使用 **Superfloppy + 后置 MBR 注入** 布局 + Debian 11 兼容 ext4 文件系统。更多说明可参考 [ArchWiki: Arch Linux on a VPS](https://wiki.archlinux.org/title/Arch_Linux_on_a_VPS#Official_Arch_Linux_cloud_image)。
 
 #### 磁盘布局原理
 
-CloudCone 宿主 GRUB 版本为 `GRUB 2.02-81.el8`。经过深入分析官方镜像，该版本 GRUB 虽然支持读取标准偏移的分区，但不支持现代 ext4 的 `64bit` (64位块寻址) 和 `metadata_csum` (元数据校验) 特性。
+CloudCone 宿主 GRUB 为 CentOS/RHEL 8 版本（`GRUB 2.02-81.el8`），通过 `configfile` 方式读取客户盘引导配置，且固定使用 `(hd0,msdos1)` 作为根设备：
 
-因此，构建时使用 `debian11-mke2fs.conf` 配置文件（通过 `MKE2FS_CONFIG` 环境变量完全覆盖构建主机的默认配置），精确控制 ext4 特性：
+- **Grub 2**：`set root=(hd0,msdos1); configfile /boot/grub2/grub.cfg`
+- **Grub Legacy**：`set root=(hd0,msdos1); legacy_configfile /boot/grub/grub.conf`
 
-- **禁用**: `64bit`, `metadata_csum`, `metadata_csum_seed`, `orphan_file`
-- **启用**: `has_journal`, `ext_attr`, `resize_inode`, `dir_index`, `extent`, `flex_bg`, `sparse_super`, `large_file`, `huge_file`, `uninit_bg`, `dir_nlink`, `extra_isize`
+该版本 GRUB 的 ext2 模块存在兼容性问题：当 ext4 文件系统位于标准分区偏移（通常 1 MiB）时，**目录遍历结果乱码**；但文件系统从字节 0 开始（superfloppy 模式）时可以正常读取。
 
-这样既保持了标准的分区表结构（方便 `sfdisk`/`growpart` 扩容），又完美兼容宿主引导器。
+本方案的解决思路：
 
-镜像使用符号链接 `/boot/grub2` → `/boot/grub` 兼容 RHEL 路径约定，并同时提供 `grub.cfg`（GRUB 2）和 `grub.conf`（Grub Legacy）。不需要 `grub-install`（宿主提供引导器，我们只提供配置文件）。
+1. **构建时**：以 superfloppy 方式创建 ext4（文件系统从字节 0 开始）
+2. **构建后**：往镜像的前 512 字节注入一个最小 MBR 分区表，分区 1 的 LBA 起始 = 0，覆盖整个磁盘
+3. ext4 的 "boot block"（字节 0-1023）是保留区域，超级块从字节 1024 开始，MBR 写入字节 446-511 不会破坏文件系统
+4. GRUB 解析 `(hd0,msdos1)` 时，分区偏移 = 0，等效于 `(hd0)` — 文件系统可正常读取
+5. VPS 的 Linux 内核检测到 MBR 后创建 `/dev/vda1`，`fstab` 和内核参数 `root=/dev/vda1` 正常工作
 
-> **注意**：构建时使用 `debian11-mke2fs.conf` 控制 `mkfs.ext4`（通过 `MKE2FS_CONFIG` 环境变量），完全隔离构建主机的 e2fsprogs 默认配置。这确保了无论 Arch Linux 的 e2fsprogs 版本多新，格式化出的 ext4 始终只包含我们指定的特性集。
+镜像真实文件在 `/boot/grub2/`（宿主 GRUB 读取此路径），符号链接 `/boot/grub` → `/boot/grub2`（兼容 Arch 工具），并同时提供 `grub.cfg`（GRUB 2）和 `grub.conf`（Grub Legacy）。不需要 `grub-install`（宿主提供引导器，我们只提供配置文件）。
+
+> **注意**：构建时使用 `debian11-mke2fs.conf` 控制 `mkfs.ext4`，避免 Arch 最新 e2fsprogs 默认启用的 `metadata_csum_seed` / `orphan_file` 等 incompat 特性导致宿主 GRUB 无法识别文件系统。
 
 ## 开发与构建
 
@@ -52,9 +56,22 @@ CloudCone 宿主 GRUB 版本为 `GRUB 2.02-81.el8`。经过深入分析官方镜
 
 1. 进入 GitHub 的 **Actions** 页面。
 2. 选择 **Build CloudCone Arch Raw**。
-3. 点击 **Run workflow**，填写 `version`（默认 `6.18.7`）。
+3. 点击 **Run workflow**，填写 `version`。
 4. 如需覆盖同名标签发布，可设置 `overwrite_release=true`。
 5. 等待工作流执行完成。
+
+#### 版本号与镜像大小
+
+版本号最后一段可以指定镜像大小。格式为 `<基础版本>.<大小G>`：
+
+- `6.18.9` — 无大小后缀，使用默认 **5G** 镜像
+- `6.18.9.5G` — 构建 **5G** 镜像
+- `6.18.9.18G` — 构建 **18G** 镜像
+- `6.18.9.40G` — 构建 **40G** 镜像
+
+构建脚本会自动解析版本号末尾的 `<数字>G` 后缀。如果匹配，则以该大小创建磁盘镜像；如果不匹配，则使用默认的 5G。
+
+这种方式从构建时就确定了镜像大小，dd 写入后磁盘分区即为目标大小，**无需运行时扩容**。
 
 发布产物：
 
@@ -124,10 +141,11 @@ boot
 
 ### 进入系统后：重建引导配置
 
-手动引导进入系统后，重写 `/boot/grub/grub.cfg`：
+手动引导进入系统后，重写 `/boot/grub2/grub.cfg`：
 
 ```bash
-cat <<'EOF' > /boot/grub/grub.cfg
+mkdir -p /boot/grub2
+cat <<'EOF' > /boot/grub2/grub.cfg
 set root=(hd0,msdos1)
 set timeout=1
 set default=0
@@ -146,7 +164,7 @@ menuentry "Arch Linux (fallback)" {
     initrd /boot/initramfs-linux-fallback.img
 }
 EOF
-ln -sf grub /boot/grub2
+ln -sf grub2 /boot/grub
 sync
 reboot
 ```
@@ -155,10 +173,12 @@ reboot
 
 如果 `dd` 后虚拟机无法启动，可通过救援系统修复。
 
+> **注意**：镜像使用 Superfloppy + MBR 注入布局，分区 1 起始于 LBA 0。救援系统中 `/dev/vda1` 和 `/dev/vda` 实际指向同一数据，若 `/dev/vda1` 不存在，可直接使用 `/dev/vda`。
+
 ```bash
-mount /dev/vda1 /mnt
-mkdir -p /mnt/boot/grub
-cat <<'EOF' > /mnt/boot/grub/grub.cfg
+mount /dev/vda1 /mnt  # 若不存在，改用: mount /dev/vda /mnt
+mkdir -p /mnt/boot/grub2
+cat <<'EOF' > /mnt/boot/grub2/grub.cfg
 set root=(hd0,msdos1)
 set timeout=1
 set default=0
@@ -177,29 +197,18 @@ menuentry "Arch Linux (fallback)" {
     initrd /boot/initramfs-linux-fallback.img
 }
 EOF
-ln -sf grub /mnt/boot/grub2
+rm -rf /mnt/boot/grub
+ln -sf grub2 /mnt/boot/grub
 umount /mnt
 sync
 reboot
 ```
 
-### 自动扩容
+### 关于磁盘大小
 
-镜像已内置自动扩容脚本，首次启动时会自动扩展根分区以利用全部磁盘空间。
+镜像默认大小为 5G。如果 VPS 磁盘大于 5G，建议在构建时通过版本号后缀指定目标大小（参见上方"版本号与镜像大小"章节），这样 dd 后磁盘即为目标大小，无需额外扩容。
 
-若自动扩容失败（例如识别到根盘仍只有约 `5G`），可手动执行以下命令修复。
-
-由于镜像使用 **标准 MBR 分区**（分区 1 起始于 2048 扇区），可直接使用标准工具扩容。
-
-**手动扩容命令：**
-
-```bash
-# 1. 扩容分区
-growpart /dev/vda 1
-
-# 2. 在线扩容文件系统
-resize2fs /dev/vda1
-```
+如果已经 dd 了默认 5G 镜像到更大的磁盘，由于镜像使用 Superfloppy + MBR 注入布局（分区 1 起始于 LBA 0），标准扩容工具可能不兼容。建议重新构建匹配目标大小的镜像。
 
 已知限制与排障：
 

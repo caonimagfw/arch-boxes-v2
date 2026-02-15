@@ -43,26 +43,22 @@ function cleanup() {
 }
 trap cleanup EXIT
 
-# Create standard MBR partition table with partition 1 starting at sector 2048.
-# This aligns with standard practices and CloudCone's official images.
+# Create the disk image as a "superfloppy" — ext4 starting at byte 0,
+# no partition table during build.  After unmount we inject a fake MBR
+# so CloudCone host GRUB can address it as (hd0,msdos1).
+#
+# Why: host GRUB 2.02's ext2 module can traverse ext4 directories when
+# the filesystem starts at byte 0 (proven with superfloppy), but garbles
+# directory listings when the filesystem sits behind a real 1 MiB partition
+# offset.  The fake-MBR trick sets partition 1 LBA-start = 0, so GRUB
+# resolves (hd0,msdos1) to byte 0 — identical to (hd0).
 function setup_disk() {
   truncate -s "${DEFAULT_DISK_SIZE}" "${IMAGE}"
 
-  # Create MBR partition table:
-  # Partition 1: start=2048, type=83 (Linux), bootable
-  echo 'start=2048, type=83, bootable' | sfdisk "${IMAGE}"
-
-  # Map partition 1 (offset 2048 sectors = 1048576 bytes)
-  LOOPDEV=$(losetup --offset 1048576 --find --show "${IMAGE}")
-
-  # Use CloudCone-compatible mke2fs.conf to completely override the build host's
-  # default features. This ensures the ext4 filesystem matches CloudCone's
-  # official Debian 11 images exactly, guaranteeing GRUB 2.02 compatibility.
-  # hash_alg=half_md4 is set in mke2fs.conf [defaults] section.
-  #   -e continue — errors behavior: Continue (match Debian 11)
-  MKE2FS_CONFIG="${ORIG_PWD}/debian11-mke2fs.conf" mkfs.ext4 -F \
-    -e continue \
-    "${LOOPDEV}"
+  LOOPDEV=$(losetup --find --show "${IMAGE}")
+  # Use Debian 11 mke2fs.conf so the ext4 filesystem matches what CloudCone's
+  # host GRUB can read (no metadata_csum_seed / orphan_file incompat features).
+  MKE2FS_CONFIG="${ORIG_PWD}/debian11-mke2fs.conf" mkfs.ext4 -F "${LOOPDEV}"
   mount "${LOOPDEV}" "${MOUNT}"
 }
 
@@ -90,6 +86,9 @@ EOF
 
 # Cleanup the image and trim it
 function image_cleanup() {
+  # Remove pacman key ring for re-initialization
+  rm -rf "${MOUNT}/etc/pacman.d/gnupg/"
+
   # The mkinitcpio autodetect hook removes modules not needed by the
   # running system from the initramfs. This make the image non-bootable
   # on some systems as initramfs lacks the relevant kernel modules.
@@ -121,59 +120,13 @@ function image_cleanup() {
   echo "=== [image-size] Largest directories ==="
   du -sh "${MOUNT}/usr/lib/modules/"* "${MOUNT}/usr/lib/firmware/" "${MOUNT}/usr/share/locale/" 2>/dev/null || true
 
-  # Zero-fill free space so zstd compresses efficiently.
-  # NOTE: Do NOT use fstrim here. On file-backed loop devices with an offset,
-  # fstrim sends DISCARD/PUNCH_HOLE requests that can hit wrong offsets due to
-  # kernel loop driver bugs, silently zeroing out live data blocks.
-  dd if=/dev/zero of="${MOUNT}/.zerofill" bs=1M 2>/dev/null || true
-  rm -f "${MOUNT}/.zerofill"
   sync -f "${MOUNT}/etc/os-release"
+  fstrim --verbose "${MOUNT}"
 }
 
-# Force-disable ext4 features that GRUB 2.02 (CloudCone host) cannot read.
-#
-# Why: Even though mkfs.ext4 uses our restricted mke2fs.conf, subsequent
-# operations (pacstrap, pacman hooks, mkinitcpio, e2fsprogs upgrades, or
-# fstrim on offset loop devices) can silently re-enable features like
-# dir_index, metadata_csum, 64bit, orphan_file, etc.
-# This function is the final safety net — runs on the unmounted device
-# right before compression, guaranteeing GRUB 2.02 compatibility.
-#
-# $1 — raw image file path
-function sanitize_ext4() {
-  local img="${1}"
-  local dev
-
-  dev=$(losetup --offset 1048576 --find --show "${img}")
-
-  echo "=== [ext4-sanitize] Features BEFORE ==="
-  tune2fs -l "${dev}" 2>/dev/null | grep -iE "features|Filesystem revision|extra isize|hash"
-
-  # Disable features NOT present on CloudCone's Debian 11.
-  # Keep dir_index (Debian 11 has it; GRUB 2.02 reads it with half_md4 hash).
-  tune2fs -O ^metadata_csum,^metadata_csum_seed,^64bit,^orphan_file,^large_dir \
-    "${dev}" 2>/dev/null || true
-
-  # Force directory hash algorithm to match Debian 11.
-  # half_md4 is the only hash GRUB 2.02-81.el8 can traverse.
-  tune2fs -E hash_alg=half_md4 "${dev}" 2>/dev/null || true
-
-  # NOTE: Do NOT run e2fsck here. The filesystem was cleanly unmounted and
-  # does not need repair. e2fsck -D (from e2fsprogs 1.47.3) rebuilds htree
-  # directory indexes in a format that GRUB 2.02 cannot parse, causing
-  # directories to appear empty. The kernel-created directory structures
-  # (from pacstrap/pacman operations) are already GRUB 2.02 compatible.
-
-  echo "=== [ext4-sanitize] Features AFTER ==="
-  tune2fs -l "${dev}" 2>/dev/null | grep -iE "features|Filesystem revision|extra isize|hash"
-
-  losetup -d "${dev}"
-}
-
-# Mount image helper (loop device + mount) — partition 1 offset
+# Mount image helper (loop device + mount) — superfloppy, no partitions
 function mount_image() {
-  # Mount partition 1 (offset 2048 sectors = 1048576 bytes)
-  LOOPDEV=$(losetup --offset 1048576 --find --show "${1:-${IMAGE}}")
+  LOOPDEV=$(losetup --find --show "${1:-${IMAGE}}")
   mount "${LOOPDEV}" "${MOUNT}"
   # Setup bind mount to package cache
   mount --bind "/var/cache/pacman/pkg" "${MOUNT}/var/cache/pacman/pkg"
@@ -186,6 +139,47 @@ function unmount_image() {
   LOOPDEV=""
 }
 
+# Inject a minimal MBR partition table into a superfloppy image.
+# Partition 1 starts at LBA 0 and spans the entire image.
+#
+# This lets CloudCone host GRUB address the disk as (hd0,msdos1) while
+# the ext4 filesystem still begins at byte 0 (where GRUB 2.02 can read
+# it without garbling directory listings).
+#
+# Safety: ext4's "boot block" (bytes 0-1023) is reserved / unused by the
+# filesystem.  The superblock lives at byte 1024.  Writing a 66-byte MBR
+# structure at offsets 446-511 is harmless.
+#
+# On the VPS the Linux kernel detects the MBR and exposes /dev/vda1,
+# so root=/dev/vda1 and fstab entries work as expected.
+function inject_mbr() {
+  local image="${1}"
+  local total_bytes total_sectors
+  total_bytes=$(stat -c %s "${image}")
+  total_sectors=$(( total_bytes / 512 ))
+
+  # Little-endian bytes of total_sectors (4 bytes)
+  local s0 s1 s2 s3
+  s0=$(printf '%02x' $(( total_sectors & 0xFF )))
+  s1=$(printf '%02x' $(( (total_sectors >> 8)  & 0xFF )))
+  s2=$(printf '%02x' $(( (total_sectors >> 16) & 0xFF )))
+  s3=$(printf '%02x' $(( (total_sectors >> 24) & 0xFF )))
+
+  # 16-byte partition entry at offset 446:
+  #   80           = bootable
+  #   00 01 00     = CHS start (head 0, sector 1, cylinder 0)
+  #   83           = Linux partition type
+  #   FE FF FF     = CHS end   (LBA-mode max)
+  #   00 00 00 00  = LBA start = 0
+  #   s0 s1 s2 s3  = LBA size  = total_sectors
+  printf '\x80\x00\x01\x00\x83\xfe\xff\xff\x00\x00\x00\x00\x'"${s0}"'\x'"${s1}"'\x'"${s2}"'\x'"${s3}" | \
+    dd of="${image}" bs=1 seek=446 conv=notrunc status=none
+
+  # MBR boot signature
+  printf '\x55\xaa' | dd of="${image}" bs=1 seek=510 conv=notrunc status=none
+
+  echo "MBR injected: partition 1 @ LBA 0, ${total_sectors} sectors ($(( total_bytes / 1024 / 1024 )) MiB)"
+}
 
 # Compute SHA256, adjust owner to $SUDO_UID:$SUDO_UID and move to output/
 function mv_to_output() {
@@ -240,7 +234,7 @@ function create_image() {
   "${2}"
   image_cleanup
   unmount_image
-  sanitize_ext4 "${tmp_image}"
+  inject_mbr "${tmp_image}"
   "${3}" "${tmp_image}" "${1}"
   mv_to_output "${1}"
 }
@@ -265,7 +259,6 @@ function main() {
   source "${ORIG_PWD}/images/base.sh"
   pre
   unmount_image
-  sanitize_ext4 "${IMAGE}"
 
   local build_version
   if [ -z "${1:-}" ]; then
@@ -274,6 +267,13 @@ function main() {
     echo "Falling back to $build_version"
   else
     build_version="${1}"
+  fi
+
+  # Parse optional disk size from version suffix (e.g. "6.18.9.18G" -> "18G")
+  local version_disk_size=""
+  if [[ "${build_version}" =~ \.([0-9]+[Gg])$ ]]; then
+    version_disk_size="${BASH_REMATCH[1]^^}"
+    echo "Detected disk size from version suffix: ${version_disk_size}"
   fi
 
   local image_filter image_count
@@ -285,6 +285,9 @@ function main() {
     fi
     # shellcheck source=/dev/null
     source "${image}"
+    if [ -n "${version_disk_size}" ]; then
+      DISK_SIZE="${version_disk_size}"
+    fi
     create_image "${IMAGE_NAME}" pre post
     image_count=$((image_count + 1))
   done
