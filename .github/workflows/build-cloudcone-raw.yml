@@ -64,41 +64,6 @@ jobs:
             gh release delete "${TAG}" --repo "${REPO}" --cleanup-tag --yes
           fi
 
-      - name: Create disk image with Debian 11 e2fsprogs (GRUB 2.02 compatible)
-        run: |
-          set -euo pipefail
-          # Create the disk image and ext4 filesystem using Debian 11's
-          # e2fsprogs (1.46.2). This guarantees the on-disk format is
-          # byte-identical to CloudCone's official Debian images, so
-          # their GRUB 2.02-81.el8 can read it without issues.
-          mkdir -p tmp
-          sudo docker run --rm --privileged \
-            -v /dev:/dev \
-            -v "${PWD}:/workspace" \
-            -w /workspace \
-            debian:11 \
-            bash -c '
-              set -euo pipefail
-              apt-get update -qq && apt-get install -y -qq e2fsprogs fdisk >/dev/null
-
-              echo "=== Debian 11 e2fsprogs version ==="
-              mkfs.ext4 -V 2>&1 || true
-
-              # Create 5G image with MBR partition table
-              truncate -s 5G tmp/image.img
-              echo "start=2048, type=83, bootable" | sfdisk tmp/image.img
-
-              # Format partition 1 with CloudCone-compatible ext4 features
-              LOOPDEV=$(losetup --offset 1048576 --find --show tmp/image.img)
-              MKE2FS_CONFIG=debian11-mke2fs.conf mkfs.ext4 -F "$LOOPDEV"
-
-              echo "=== ext4 features created by Debian 11 ==="
-              tune2fs -l "$LOOPDEV" | grep -iE "features|extra_isize|hash"
-
-              losetup -d "$LOOPDEV"
-              echo "Disk image created successfully."
-            '
-
       - name: Build cloud-image raw in privileged Arch container
         run: |
           set -euo pipefail
