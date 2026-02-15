@@ -43,27 +43,30 @@ function cleanup() {
 }
 trap cleanup EXIT
 
-# Create standard MBR partition table with partition 1 starting at sector 2048.
-# This aligns with standard practices and CloudCone's official images.
+# Set up the disk image for installation.
+#
+# Preferred path (CI): The GitHub Actions workflow creates a pre-formatted
+# image at tmp/image.img using Debian 11's e2fsprogs (1.46.2). This
+# guarantees the ext4 on-disk format is byte-identical to CloudCone's
+# official Debian images, ensuring GRUB 2.02 compatibility.
+#
+# Fallback path (local build): If no pre-formatted image exists, create
+# and format one here using the host's mkfs.ext4 with our mke2fs.conf.
 function setup_disk() {
-  truncate -s "${DEFAULT_DISK_SIZE}" "${IMAGE}"
+  local preformatted="${ORIG_PWD}/tmp/image.img"
 
-  # Create MBR partition table:
-  # Partition 1: start=2048, type=83 (Linux), bootable
-  echo 'start=2048, type=83, bootable' | sfdisk "${IMAGE}"
+  if [ -f "${preformatted}" ]; then
+    echo "=== Using pre-formatted image from Debian 11 e2fsprogs ==="
+    cp -a "${preformatted}" "${IMAGE}"
+    LOOPDEV=$(losetup --offset 1048576 --find --show "${IMAGE}")
+  else
+    echo "=== No pre-formatted image found, creating with host e2fsprogs ==="
+    truncate -s "${DEFAULT_DISK_SIZE}" "${IMAGE}"
+    echo 'start=2048, type=83, bootable' | sfdisk "${IMAGE}"
+    LOOPDEV=$(losetup --offset 1048576 --find --show "${IMAGE}")
+    MKE2FS_CONFIG="${ORIG_PWD}/debian11-mke2fs.conf" mkfs.ext4 -F "${LOOPDEV}"
+  fi
 
-  # Map partition 1 (offset 2048 sectors = 1048576 bytes)
-  LOOPDEV=$(losetup --offset 1048576 --find --show "${IMAGE}")
-
-  # Use CloudCone-compatible mke2fs.conf to completely override the build host's
-  # default features. This ensures the ext4 filesystem matches CloudCone's
-  # Debian 11 images exactly, guaranteeing GRUB 2.02 compatibility.
-  # -E hash_alg=half_md4  — match Debian 11 directory hash (GRUB 2.02 compatible)
-  # -I 256                — inode size 256 (match Debian 11)
-  MKE2FS_CONFIG="${ORIG_PWD}/debian11-mke2fs.conf" mkfs.ext4 -F \
-    -E hash_alg=half_md4 \
-    -I 256 \
-    "${LOOPDEV}"
   mount "${LOOPDEV}" "${MOUNT}"
 }
 
@@ -131,14 +134,15 @@ function image_cleanup() {
   sync -f "${MOUNT}/etc/os-release"
 }
 
-# Force-disable ext4 features that GRUB 2.02 (CloudCone host) cannot read.
+# Final safety net: ensure ext4 features match CloudCone Debian 11 exactly.
 #
-# Why: Even though mkfs.ext4 uses our restricted mke2fs.conf, subsequent
-# operations (pacstrap, pacman hooks, mkinitcpio, e2fsprogs upgrades, or
-# fstrim on offset loop devices) can silently re-enable features like
-# dir_index, metadata_csum, 64bit, orphan_file, etc.
-# This function is the final safety net — runs on the unmounted device
-# right before compression, guaranteeing GRUB 2.02 compatibility.
+# Target features (from CloudCone Debian 11 tune2fs -l):
+#   has_journal ext_attr resize_inode dir_index filetype extent flex_bg
+#   sparse_super large_file huge_file uninit_bg dir_nlink extra_isize
+#
+# This function disables any feature NOT in the above list that may have
+# been added by Arch's newer e2fsprogs during pacstrap/pacman operations.
+# It also runs e2fsck to ensure filesystem consistency.
 #
 # $1 — raw image file path
 function sanitize_ext4() {
@@ -148,26 +152,22 @@ function sanitize_ext4() {
   dev=$(losetup --offset 1048576 --find --show "${img}")
 
   echo "=== [ext4-sanitize] Features BEFORE ==="
-  tune2fs -l "${dev}" 2>/dev/null | grep -iE "features|Filesystem revision|extra isize|hash"
+  tune2fs -l "${dev}" 2>/dev/null | grep -iE "features|Filesystem revision|extra_isize|hash"
 
-  # Disable features NOT present in CloudCone's Debian 11 reference image.
-  # Keep dir_index (Debian 11 has it, GRUB 2.02 reads it with half_md4 hash).
-  # ^metadata_csum    — checksummed metadata unsupported by GRUB 2.02
-  # ^metadata_csum_seed — seed variant of above
-  # ^64bit            — 64-bit block addressing unsupported by GRUB 2.02
-  # ^orphan_file      — e2fsprogs ≥1.47 feature, not in Debian 11
-  # ^large_dir        — not in Debian 11
+  # Disable features NOT present in CloudCone Debian 11.
+  # ^metadata_csum       — GRUB 2.02 can't parse checksummed metadata
+  # ^metadata_csum_seed  — seed variant of above
+  # ^64bit               — GRUB 2.02 can't handle 64-bit block addressing
+  # ^orphan_file         — e2fsprogs >=1.47 feature, unknown to GRUB 2.02
+  # ^large_dir           — not in Debian 11
   tune2fs -O ^metadata_csum,^metadata_csum_seed,^64bit,^orphan_file,^large_dir \
     "${dev}" 2>/dev/null || true
-
-  # Force extra_isize=28 and hash_alg=half_md4 to match Debian 11 exactly.
-  tune2fs -E hash_alg=half_md4 "${dev}" 2>/dev/null || true
 
   # Fix any inconsistencies.
   e2fsck -fy "${dev}" 2>/dev/null || true
 
   echo "=== [ext4-sanitize] Features AFTER ==="
-  tune2fs -l "${dev}" 2>/dev/null | grep -iE "features|Filesystem revision|extra isize|hash"
+  tune2fs -l "${dev}" 2>/dev/null | grep -iE "features|Filesystem revision|extra_isize|hash"
 
   losetup -d "${dev}"
 }
