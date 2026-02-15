@@ -13,7 +13,7 @@ function pre() {
   # Swap
   mkdir -p "${MOUNT}/swap"
   chmod 0700 "${MOUNT}/swap"
-  dd if=/dev/zero of="${MOUNT}/swap/swapfile" bs=1M count=2048 status=none
+  dd if=/dev/zero of="${MOUNT}/swap/swapfile" bs=1M count=1024 status=none
   chmod 0600 "${MOUNT}/swap/swapfile"
   mkswap "${MOUNT}/swap/swapfile" >/dev/null
   echo "/swap/swapfile none swap defaults 0 0" >>"${MOUNT}/etc/fstab"
