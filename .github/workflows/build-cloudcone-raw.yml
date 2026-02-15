@@ -79,23 +79,7 @@ jobs:
                 arch-install-scripts \
                 e2fsprogs \
                 util-linux \
-                zstd \
-                base-devel
-
-              # Build e2fsprogs 1.46.2 (matches Debian 11 / CloudCone GRUB 2.02).
-              # The system e2fsprogs (latest Arch) is kept for pacstrap/tune2fs/e2fsck;
-              # only mkfs.ext4 is overridden with the old version to produce a
-              # GRUB 2.02-compatible on-disk format.
-              E2FS_VER=1.46.2
-              curl -sL "https://kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v${E2FS_VER}/e2fsprogs-${E2FS_VER}.tar.gz" | tar xz
-              cd "e2fsprogs-${E2FS_VER}"
-              ./configure --prefix=/opt/e2fs-compat --disable-nls --disable-defrag >/dev/null
-              make -j"$(nproc)" >/dev/null
-              make install >/dev/null
-              cd ..
-              echo "=== e2fsprogs compat version ==="
-              /opt/e2fs-compat/sbin/mkfs.ext4 -V 2>&1 || true
-
+                zstd
               chmod +x ./build.sh ./images/*.sh
               ./build.sh "${{ github.event.inputs.version }}"
             '

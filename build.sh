@@ -55,16 +55,15 @@ function setup_disk() {
   # Map partition 1 (offset 2048 sectors = 1048576 bytes)
   LOOPDEV=$(losetup --offset 1048576 --find --show "${IMAGE}")
 
-  # Use e2fsprogs 1.46.2 (matching Debian 11 / CloudCone) with our custom
-  # mke2fs.conf. This guarantees the on-disk format is identical to what
-  # CloudCone's GRUB 2.02-81.el8 expects — same features, same superblock
-  # fields, same directory hash defaults (half_md4).
-  local mkfs_bin="/opt/e2fs-compat/sbin/mkfs.ext4"
-  if [ ! -x "${mkfs_bin}" ]; then
-    echo "WARNING: e2fsprogs 1.46.2 not found at ${mkfs_bin}, falling back to system mkfs.ext4"
-    mkfs_bin="mkfs.ext4"
-  fi
-  MKE2FS_CONFIG="${ORIG_PWD}/debian11-mke2fs.conf" "${mkfs_bin}" -F "${LOOPDEV}"
+  # Use CloudCone-compatible mke2fs.conf to completely override the build host's
+  # default features. This ensures the ext4 filesystem matches CloudCone's
+  # Debian 11 images exactly, guaranteeing GRUB 2.02 compatibility.
+  # -E hash_alg=half_md4  — match Debian 11 directory hash (GRUB 2.02 compatible)
+  # -I 256                — inode size 256 (match Debian 11)
+  MKE2FS_CONFIG="${ORIG_PWD}/debian11-mke2fs.conf" mkfs.ext4 -F \
+    -E hash_alg=half_md4 \
+    -I 256 \
+    "${LOOPDEV}"
   mount "${LOOPDEV}" "${MOUNT}"
 }
 
@@ -132,14 +131,14 @@ function image_cleanup() {
   sync -f "${MOUNT}/etc/os-release"
 }
 
-# Final safety net: ensure ext4 features match CloudCone's Debian 11 exactly.
+# Force-disable ext4 features that GRUB 2.02 (CloudCone host) cannot read.
 #
-# Target features (from working CloudCone Debian 11):
-#   has_journal ext_attr resize_inode dir_index filetype extent flex_bg
-#   sparse_super large_file huge_file uninit_bg dir_nlink extra_isize
-#
-# This function disables any features that pacstrap/pacman/mkinitcpio might
-# have added beyond the target set, and verifies the final state.
+# Why: Even though mkfs.ext4 uses our restricted mke2fs.conf, subsequent
+# operations (pacstrap, pacman hooks, mkinitcpio, e2fsprogs upgrades, or
+# fstrim on offset loop devices) can silently re-enable features like
+# dir_index, metadata_csum, 64bit, orphan_file, etc.
+# This function is the final safety net — runs on the unmounted device
+# right before compression, guaranteeing GRUB 2.02 compatibility.
 #
 # $1 — raw image file path
 function sanitize_ext4() {
@@ -149,18 +148,26 @@ function sanitize_ext4() {
   dev=$(losetup --offset 1048576 --find --show "${img}")
 
   echo "=== [ext4-sanitize] Features BEFORE ==="
-  tune2fs -l "${dev}" 2>/dev/null | grep -iE "features|Filesystem revision|extra isize|directory hash"
+  tune2fs -l "${dev}" 2>/dev/null | grep -iE "features|Filesystem revision|extra isize|hash"
 
-  # Disable features NOT present on CloudCone Debian 11.
-  # Keep dir_index — Debian 11 has it and GRUB 2.02 reads it fine (with half_md4 hash).
+  # Disable features NOT present in CloudCone's Debian 11 reference image.
+  # Keep dir_index (Debian 11 has it, GRUB 2.02 reads it with half_md4 hash).
+  # ^metadata_csum    — checksummed metadata unsupported by GRUB 2.02
+  # ^metadata_csum_seed — seed variant of above
+  # ^64bit            — 64-bit block addressing unsupported by GRUB 2.02
+  # ^orphan_file      — e2fsprogs ≥1.47 feature, not in Debian 11
+  # ^large_dir        — not in Debian 11
   tune2fs -O ^metadata_csum,^metadata_csum_seed,^64bit,^orphan_file,^large_dir \
     "${dev}" 2>/dev/null || true
+
+  # Force extra_isize=28 and hash_alg=half_md4 to match Debian 11 exactly.
+  tune2fs -E hash_alg=half_md4 "${dev}" 2>/dev/null || true
 
   # Fix any inconsistencies.
   e2fsck -fy "${dev}" 2>/dev/null || true
 
   echo "=== [ext4-sanitize] Features AFTER ==="
-  tune2fs -l "${dev}" 2>/dev/null | grep -iE "features|Filesystem revision|extra isize|directory hash"
+  tune2fs -l "${dev}" 2>/dev/null | grep -iE "features|Filesystem revision|extra isize|hash"
 
   losetup -d "${dev}"
 }
