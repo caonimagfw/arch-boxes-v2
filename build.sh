@@ -86,9 +86,6 @@ EOF
 
 # Cleanup the image and trim it
 function image_cleanup() {
-  # Remove pacman key ring for re-initialization
-  rm -rf "${MOUNT}/etc/pacman.d/gnupg/"
-
   # The mkinitcpio autodetect hook removes modules not needed by the
   # running system from the initramfs. This make the image non-bootable
   # on some systems as initramfs lacks the relevant kernel modules.
