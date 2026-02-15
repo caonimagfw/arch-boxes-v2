@@ -154,14 +154,15 @@ function sanitize_ext4() {
   tune2fs -O ^metadata_csum,^metadata_csum_seed,^64bit,^orphan_file,^large_dir \
     "${dev}" 2>/dev/null || true
 
-  # Force directory hash algorithm and extra inode size to match Debian 11.
+  # Force directory hash algorithm to match Debian 11.
   # half_md4 is the only hash GRUB 2.02-81.el8 can traverse.
-  # extra_isize 28 matches Debian 11 (e2fsprogs 1.46.2) — newer versions
-  # default to 32 which may confuse GRUB 2.02.
   tune2fs -E hash_alg=half_md4 "${dev}" 2>/dev/null || true
 
-  # Fix any inconsistencies and optimize directory indexes.
-  e2fsck -fy -D "${dev}" 2>/dev/null || true
+  # NOTE: Do NOT run e2fsck here. The filesystem was cleanly unmounted and
+  # does not need repair. e2fsck -D (from e2fsprogs 1.47.3) rebuilds htree
+  # directory indexes in a format that GRUB 2.02 cannot parse, causing
+  # directories to appear empty. The kernel-created directory structures
+  # (from pacstrap/pacman operations) are already GRUB 2.02 compatible.
 
   echo "=== [ext4-sanitize] Features AFTER ==="
   tune2fs -l "${dev}" 2>/dev/null | grep -iE "features|Filesystem revision|extra isize|hash"
