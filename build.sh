@@ -95,8 +95,13 @@ function image_cleanup() {
   # So for the initial install we skip the autodetct hook.
   arch-chroot "${MOUNT}" /usr/bin/mkinitcpio -p linux -- -S autodetect
 
+  # Zero-fill free space so zstd compresses efficiently.
+  # NOTE: Do NOT use fstrim here. On file-backed loop devices with an offset,
+  # fstrim sends DISCARD/PUNCH_HOLE requests that can hit wrong offsets due to
+  # kernel loop driver bugs, silently zeroing out live data blocks.
+  dd if=/dev/zero of="${MOUNT}/.zerofill" bs=1M 2>/dev/null || true
+  rm -f "${MOUNT}/.zerofill"
   sync -f "${MOUNT}/etc/os-release"
-  fstrim --verbose "${MOUNT}"
 }
 
 # Force-disable ext4 features that GRUB 2.02 (CloudCone host) cannot read.
