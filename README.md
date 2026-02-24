@@ -96,59 +96,68 @@ umount -R /dev/vda* 2>/dev/null || true
 
 ```bash
 wget -O- https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.raw.zst | zstd -d | dd of=/dev/vda bs=1M status=progress conv=fsync
-sync
 ```
 
 方式 B（`tar.zst`）：
 
 ```bash
 wget -O- https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.tar.zst | zstd -d | tar -xO -f - --wildcards '*cloudimg*.raw' | dd of=/dev/vda bs=1M status=progress conv=fsync
-sync
 ```
 
-`dd` 完成后：
+`dd` 完成后（`conv=fsync` 已确保数据落盘）：
 
-1. 执行 `sync`
-2. 关闭救援系统
+1. 关闭救援系统
 3. 在面板切回 VPS 系统盘启动
 4. 正常开机
 
 ### DD 一键脚本：自动记录并恢复网络
 
-在救援系统中执行以下脚本，会自动完成：记录当前 IP/网关 → dd 写盘 → 挂载新系统 → 写入网络配置 → 卸载。
+在**当前在线系统**（或救援系统）中执行以下脚本，会自动完成：记录当前 IP/网关 → 预生成配置到 tmpfs → 复制关键工具到 tmpfs → dd 写盘 → debugfs 写入网络配置 → 重启。
 
 > **使用前**：将 `DD_URL` 替换为实际镜像地址。脚本假设磁盘为 `/dev/vda`、网络接口为 `eth0`（镜像内核使用 `net.ifnames=0`）。
+>
+> **在线 dd 原理**：dd 覆盖磁盘后，所有磁盘上的文件（包括共享库）均已丢失。脚本在 dd 前将 `debugfs` 及其依赖库复制到 `/run`（tmpfs / 内存），确保 dd 后仍可正常执行。使用 `debugfs -w` 绕过 VFS 直接向 ext4 写入配置（内核旧根挂载仍持有块设备，mount 不可用）。
 
 ```bash
 #!/bin/bash
 set -euo pipefail
 
-DD_URL="https://github.com/OWNER/REPO/releases/download/vX.Y.Z/Arch-Linux-x86_64-cloudimg-X.Y.Z.raw.zst"
-DISK="/dev/vda"
+# 【关键修复】将整个脚本包在 main 函数中
+# 这样 bash 会在执行前将整个函数体读入内存。
+# 防止 dd 覆盖磁盘后，bash 从被覆盖的磁盘中读出新镜像的二进制乱码当成脚本执行，从而引发 SQLite syntax error 等离奇崩溃。
+main() {
+  # 安装依赖；当前系统已有则跳过
+  for pkg in zstd e2fsprogs; do
+    if ! dpkg -s "$pkg" &>/dev/null; then
+      apt-get update -qq && apt-get install -y zstd e2fsprogs
+      break
+    fi
+  done
 
-# ---- 1. 记录当前网络 ----
-DEV=$(ip -4 route show default | awk '{print $5; exit}')
-IP4=$(ip -4 addr show "$DEV" | grep -oP 'inet \K[\d.]+/\d+')
-GW4=$(ip -4 route show default | awk '{print $3; exit}')
+  DD_URL="https://github.com/OWNER/REPO/releases/download/vX.Y.Z/Arch-Linux-x86_64-cloudimg-X.Y.Z.raw.zst"
+  DISK="/dev/vda"
+  PART="${DISK}1"
 
-DEV6=$(ip -6 route show default | awk '{print $5; exit}')
-IP6=$(ip -6 addr show "${DEV6:-$DEV}" scope global | grep -oP 'inet6 \K[0-9a-f:]+/\d+' | head -1)
-GW6=$(ip -6 route show default | awk '{print $3; exit}')
+  # ---- 1. 记录当前网络 ----
+  DEV=$(ip -4 route show default | grep -oP 'dev \K\w+' | head -n 1 || true)
+  IP4=$(ip -4 addr show "${DEV:-}" 2>/dev/null | grep -oP 'inet \K[\d.]+/\d+' | grep -v '127\.0\.0\.' | head -n 1 || true)
+  GW4=$(ip -4 route show default | grep -oP 'via \K[\d.]+' | head -n 1 || true)
 
-echo "IPv4: 地址=$IP4 网关=$GW4"
-echo "IPv6: 地址=${IP6:-无} 网关=${GW6:-无}"
+  DEV6=$(ip -6 route show default | grep -oP 'dev \K\w+' | head -n 1 || true)
+  IP6=$(ip -6 addr show "${DEV6:-$DEV}" scope global 2>/dev/null | grep -oP 'inet6 \K[0-9a-f:]+/\d+' | head -n 1 || true)
+  GW6=$(ip -6 route show default | grep -oP 'via \K[0-9a-f:]+' | head -n 1 || true)
 
-# ---- 2. DD 写盘 ----
-umount -R ${DISK}* 2>/dev/null || true
-wget -O- "$DD_URL" | zstd -d | dd of="$DISK" bs=1M status=progress conv=fsync
-sync
+  echo "IPv4: addr=$IP4 gw=$GW4"
+  echo "IPv6: addr=${IP6:-none} gw=${GW6:-none}"
 
-# ---- 3. 挂载新系统并恢复网络 ----
-partprobe "$DISK" 2>/dev/null || true
-mount "${DISK}1" /mnt 2>/dev/null || mount "$DISK" /mnt
+  # ---- 2. 在 tmpfs 上准备配置文件和关键工具 ----
+  WORK="/run/dd-work"
+  mkdir -p "$WORK"
+  mount -t tmpfs -o size=64m,exec tmpfs "$WORK"
+  mkdir -p "$WORK/bin" "$WORK/lib"
 
-mkdir -p /mnt/etc/systemd/network
-cat <<EOF > /mnt/etc/systemd/network/20-wired.network
+  # 2a. 预生成网络配置
+  cat > "$WORK/20-wired.network" <<EOF
 [Match]
 Name=eth0
 
@@ -159,29 +168,97 @@ DNS=1.1.1.1
 DNS=8.8.8.8
 EOF
 
-if [[ -n "${IP6:-}" ]]; then
-cat <<EOF >> /mnt/etc/systemd/network/20-wired.network
+  if [[ -n "${IP6:-}" ]]; then
+  cat >> "$WORK/20-wired.network" <<EOF
 
 Address=${IP6}
 Gateway=${GW6}
 DNS=2606:4700:4700::1111
 DNS=2001:4860:4860::8888
 EOF
-fi
+  fi
 
-mkdir -p /mnt/etc/cloud/cloud.cfg.d
-echo 'network: {config: disabled}' > /mnt/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+  echo 'network: {config: disabled}' > "$WORK/99-disable-network-config.cfg"
 
-umount /mnt
-sync
-echo "完成。关闭救援系统，切回系统盘启动即可。"
+  # 2b. 复制 debugfs 及其所有动态链接库到 tmpfs
+  DEBUGFS_BIN="$(command -v debugfs || command -v /sbin/debugfs || command -v /usr/sbin/debugfs || true)"
+  if [[ -z "$DEBUGFS_BIN" ]]; then echo "ERROR: debugfs not found"; exit 1; fi
+  cp "$DEBUGFS_BIN" "$WORK/bin/debugfs"
+  ldd "$DEBUGFS_BIN" 2>/dev/null | awk '{print $1, $3}' | while read -r lib path; do
+    # 两种情况：
+    # 1. libfoo.so => /lib/libfoo.so (path=/lib/libfoo.so)
+    # 2. /lib/ld-linux.so.2 (lib=/lib/ld-linux.so.2, path="")
+    target="${path:-$lib}"
+    [[ -n "$target" && -f "$target" ]] && cp -nL "$target" "$WORK/lib/" 2>/dev/null || true
+  done
+  chmod +x "$WORK/bin/debugfs"
+
+  echo "Config + tools saved to tmpfs ($WORK)"
+
+  # ---- 3. DD 前释放内存 ----
+  swapoff -a 2>/dev/null || true
+  systemctl stop cron rsyslog snapd unattended-upgrades 2>/dev/null || true
+  echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+
+  echo "Starting dd..."
+
+  # ---- 4. DD 写盘 ----
+  umount -R ${DISK}* 2>/dev/null || true
+  set +o pipefail
+  wget -O- "$DD_URL" | zstd -d | dd of="$DISK" bs=4M iflag=fullblock oflag=direct status=progress conv=fsync
+  DD_EXIT=${PIPESTATUS[2]}
+  set -o pipefail
+  if [[ $DD_EXIT -ne 0 ]]; then echo "ERROR: dd failed (exit $DD_EXIT)"; exit 1; fi
+
+  # ---- 5. 清除内核页缓存，确保 debugfs 读到新文件系统 ----
+  echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+
+  # ---- 6. 用 tmpfs 中的 debugfs 写入配置 ----
+  # 【关键修复】必须直接操作 $DISK (/dev/vda)，绝对不能用 /dev/vda1！
+  # 因为旧系统仍挂载在 /dev/vda1，其内核 buffer cache 中充满旧系统的 ext4 元数据。
+  # debugfs 读取 /dev/vda1 会得到新旧混合的脏数据，导致 "inode is not a directory" 报错。
+  # 且新镜像的 ext4 文件系统正是从字节 0 开始（Superfloppy），直接操作 /dev/vda 完全正确。
+
+  # 使用 Bash 内部 globbing 查找 ld-linux，避免调用 external `find` 和 `head` 导致崩溃
+  shopt -s nullglob
+  LD_SO_ARR=( "$WORK"/lib/ld-linux-*.so* )
+  shopt -u nullglob
+  if [[ ${#LD_SO_ARR[@]} -eq 0 ]]; then echo "ERROR: ld-linux not found in tmpfs"; exit 1; fi
+  LD_SO="${LD_SO_ARR[0]}"
+
+  set +e  # 关闭 set -e，防止 debugfs 因意外的非零退出码导致脚本中断
+
+  "$LD_SO" --library-path "$WORK/lib" "$WORK/bin/debugfs" -w -R \
+    "write $WORK/20-wired.network /etc/systemd/network/20-wired.network" "$DISK" 2>/dev/null || true
+  "$LD_SO" --library-path "$WORK/lib" "$WORK/bin/debugfs" -w -R \
+    "write $WORK/99-disable-network-config.cfg /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg" "$DISK" 2>/dev/null || true
+
+  echo "Network config written. Rebooting..."
+  echo s > /proc/sysrq-trigger
+
+  # 使用 Bash 内部的方式实现 sleep 2 秒（向不存在的 udp 端口 read 超时），避免调用 external `sleep` 导致崩溃
+  read -t 2 < /dev/udp/127.0.0.1/65535 2>/dev/null || true
+
+  echo b > /proc/sysrq-trigger
+}
+
+main "$@"
 ```
 
 说明：
 
-- 脚本从救援系统的默认路由接口读取 IP 和网关，dd 后写入 `systemd-networkd` 配置文件
-- 写入 `99-disable-network-config.cfg` 阻止 cloud-init 首次启动时覆盖手动网络配置
-- 如果 VPS 的 IP 不在救援系统的网卡上（例如需要手动指定），可直接修改脚本顶部的 `IP` 和 `GW` 变量
+- **强制全量读入内存**：整个脚本被包裹在 `main` 函数中。Bash 遇到函数声明时，会把整个函数体一次性读入内存（解析为 AST）再执行。这能避免 dd 期间/之后，Bash 采用流式读取时从被覆盖的物理扇区读出新镜像的二进制文件，从而引发“当作 shell 执行二进制乱码”（如 SQLite syntax error）的致命崩溃。
+- **`swapoff -a`**：swap 分区/文件在被 dd 覆盖的磁盘上，不关闭则内核 swap-in 时读到垃圾数据会 kernel panic，swap-out 则破坏新镜像
+- **独立 tmpfs + exec**：`/run` 默认挂载 `noexec`，无法执行复制过去的二进制。脚本在 `/run/dd-work` 上挂载独立 tmpfs 并带 `exec` 权限，确保 debugfs 可正常执行
+- **强制使用 tmpfs 中的动态链接器**：即使设置了 `LD_LIBRARY_PATH`，执行 `/run/dd-work/bin/debugfs` 时仍会默认调用 elf 头中硬编码的 `/lib64/ld-linux-x86-64.so.2`。因为 `/lib64` 位于已被覆盖的磁盘上，这会导致执行失败。解决方案是直接调用 tmpfs 中的动态链接器（`$LD_SO`），并用 `--library-path` 参数去加载并执行 debugfs
+- **`iflag=fullblock`**：`oflag=direct` 要求写入长度对齐到磁盘扇区（512B），管道 `read()` 可能返回短读导致非对齐写入失败；`iflag=fullblock` 强制 dd 凑满完整块再写
+- **`oflag=direct`**：dd 写出走 Direct I/O 绕过页缓存，减少对内存中其他缓存页（如 bash 自身）的冲击
+- **`set +o pipefail` + `PIPESTATUS[2]`**：dd 覆盖磁盘后 `wget` 清理阶段可能因共享库丢失而 segfault（退出码 139），`pipefail` 会把这个无害错误当作管道失败导致脚本中断。临时关闭 `pipefail`，只检查 `dd` 的退出码（管道第 3 个命令）
+- **dd 前释放内存**：停止非关键服务 + 释放页缓存，为 dd 管道（wget + zstd）腾出最大可用内存
+- **`echo s` + `echo b` > `/proc/sysrq-trigger`**：SysRq-S 触发 emergency sync 确保 debugfs 写入的数据落盘，`sleep 2` 等待完成后 SysRq-B 立即重启，全程不依赖任何用户态二进制
+- **`debugfs -w`**：绕过 VFS mount 直接操作 ext4 结构，不受内核旧根挂载的 exclusive claim 限制
+- 镜像已预建 `/etc/systemd/network/` 和 `/etc/cloud/cloud.cfg.d/` 目录，`debugfs write` 可直接写入
+- 如果 VPS 的 IP 不在当前网卡上（例如需要手动指定），可直接在脚本顶部覆盖 `IP4`、`GW4` 变量
 
 ### 手动引导：通过 GRUB 2 控制台启动（按 C）
 
