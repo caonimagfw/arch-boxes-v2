@@ -8,6 +8,14 @@ PACKAGES=(cloud-init cloud-guest-utils)
 SERVICES=(cloud-init-main.service cloud-init-local.service cloud-init-network.service cloud-config.service cloud-final.service)
 
 function pre() {
+# Disable growpart/resizefs since we don't want automatic expansion
+  mkdir -p "${MOUNT}/etc/cloud/cloud.cfg.d"
+  cat <<'EOF' >"${MOUNT}/etc/cloud/cloud.cfg.d/99-disable-growpart.cfg"
+growpart:
+  mode: off
+resize_rootfs: false
+EOF
+
   # Configure /etc/default/grub for future 'grub-mkconfig' on the live VPS.
   sed -Ei 's/^(GRUB_CMDLINE_LINUX_DEFAULT=.*)"$/\1 console=tty0 console=ttyS0,115200"/' "${MOUNT}/etc/default/grub"
   echo 'GRUB_TERMINAL="serial console"' >>"${MOUNT}/etc/default/grub"
