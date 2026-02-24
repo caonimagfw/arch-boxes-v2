@@ -77,6 +77,10 @@ Include = mirrorlist
 EOF
   echo "Server = ${MIRROR}" >mirrorlist
 
+  # Create vconsole.conf before pacstrap so mkinitcpio's sd-vconsole hook succeeds.
+  mkdir -p "${MOUNT}/etc"
+  echo "KEYMAP=us" >"${MOUNT}/etc/vconsole.conf"
+
   # We use the hosts package cache
   pacstrap -c -C pacman.conf -K -M "${MOUNT}" base linux grub openssh sudo e2fsprogs qemu-guest-agent
   # Workaround for https://gitlab.archlinux.org/archlinux/arch-install-scripts/-/issues/56

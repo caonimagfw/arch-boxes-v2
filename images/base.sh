@@ -91,9 +91,9 @@ EOF
   echo 'GRUB_DISABLE_LINUX_UUID=true' >>"${MOUNT}/etc/default/grub"
   echo 'GRUB_DISABLE_LINUX_PARTUUID=true' >>"${MOUNT}/etc/default/grub"
 
-  # Rename Arch's default /boot/grub/ to /boot/grub2/ and symlink back.
-  mv "${MOUNT}/boot/grub" "${MOUNT}/boot/grub2"
-  ln -s grub2 "${MOUNT}/boot/grub"
+  # /boot/grub2/ is the real directory; /boot/grub → grub2 symlink.
+  mkdir -p "${MOUNT}/boot/grub2"
+  ln -sfn grub2 "${MOUNT}/boot/grub"
 
   # GRUB 2 config — cloud-image.sh will overwrite with serial console.
   cat <<'GRUBCFG' >"${MOUNT}/boot/grub2/grub.cfg"
