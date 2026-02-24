@@ -14,7 +14,7 @@ function pre() {
   echo 'GRUB_SERIAL_COMMAND="serial --speed=115200"' >>"${MOUNT}/etc/default/grub"
 
   # GRUB 2 config with serial console for CloudCone VNC/serial.
-  cat <<'GRUBCFG' >"${MOUNT}/boot/grub/grub.cfg"
+  cat <<'GRUBCFG' >"${MOUNT}/boot/grub2/grub.cfg"
 set root=(hd0,msdos1)
 set timeout=1
 set default=0
@@ -35,7 +35,7 @@ menuentry "Arch Linux (fallback)" {
 GRUBCFG
 
   # Grub Legacy config with serial console.
-  cat <<'LEGACYCFG' >"${MOUNT}/boot/grub/grub.conf"
+  cat <<'LEGACYCFG' >"${MOUNT}/boot/grub2/grub.conf"
 default 0
 timeout 1
 

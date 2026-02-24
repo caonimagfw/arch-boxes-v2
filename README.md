@@ -24,7 +24,7 @@ CloudCone 宿主 GRUB 为 CentOS/RHEL 8 版本（`GRUB 2.02-81.el8`），通过 
 4. GRUB 解析 `(hd0,msdos1)` 时，分区偏移 = 0，等效于 `(hd0)` — 文件系统可正常读取
 5. VPS 的 Linux 内核检测到 MBR 后创建 `/dev/vda1`，`fstab` 和内核参数 `root=/dev/vda1` 正常工作
 
-镜像使用符号链接 `/boot/grub2` → `/boot/grub` 兼容 RHEL 路径约定，并同时提供 `grub.cfg`（GRUB 2）和 `grub.conf`（Grub Legacy）。不需要 `grub-install`（宿主提供引导器，我们只提供配置文件）。
+镜像使用 `/boot/grub2/` 作为真实目录（匹配宿主 GRUB 的 `configfile /boot/grub2/grub.cfg` 路径），`/boot/grub` → `/boot/grub2` 为符号链接（兼容 Arch `grub` 包默认路径）。同时提供 `grub.cfg`（GRUB 2）和 `grub.conf`（Grub Legacy）。不需要 `grub-install`（宿主提供引导器，我们只提供配置文件）。
 
 > **注意**：构建时使用 `debian11-mke2fs.conf` 控制 `mkfs.ext4`，避免 Arch 最新 e2fsprogs 默认启用的 `metadata_csum_seed` / `orphan_file` 等 incompat 特性导致宿主 GRUB 无法识别文件系统。
 
@@ -113,6 +113,76 @@ sync
 3. 在面板切回 VPS 系统盘启动
 4. 正常开机
 
+### DD 一键脚本：自动记录并恢复网络
+
+在救援系统中执行以下脚本，会自动完成：记录当前 IP/网关 → dd 写盘 → 挂载新系统 → 写入网络配置 → 卸载。
+
+> **使用前**：将 `DD_URL` 替换为实际镜像地址。脚本假设磁盘为 `/dev/vda`、网络接口为 `eth0`（镜像内核使用 `net.ifnames=0`）。
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+DD_URL="https://github.com/OWNER/REPO/releases/download/vX.Y.Z/Arch-Linux-x86_64-cloudimg-X.Y.Z.raw.zst"
+DISK="/dev/vda"
+
+# ---- 1. 记录当前网络 ----
+DEV=$(ip -4 route show default | awk '{print $5; exit}')
+IP4=$(ip -4 addr show "$DEV" | grep -oP 'inet \K[\d.]+/\d+')
+GW4=$(ip -4 route show default | awk '{print $3; exit}')
+
+DEV6=$(ip -6 route show default | awk '{print $5; exit}')
+IP6=$(ip -6 addr show "${DEV6:-$DEV}" scope global | grep -oP 'inet6 \K[0-9a-f:]+/\d+' | head -1)
+GW6=$(ip -6 route show default | awk '{print $3; exit}')
+
+echo "IPv4: 地址=$IP4 网关=$GW4"
+echo "IPv6: 地址=${IP6:-无} 网关=${GW6:-无}"
+
+# ---- 2. DD 写盘 ----
+umount -R ${DISK}* 2>/dev/null || true
+wget -O- "$DD_URL" | zstd -d | dd of="$DISK" bs=1M status=progress conv=fsync
+sync
+
+# ---- 3. 挂载新系统并恢复网络 ----
+partprobe "$DISK" 2>/dev/null || true
+mount "${DISK}1" /mnt 2>/dev/null || mount "$DISK" /mnt
+
+mkdir -p /mnt/etc/systemd/network
+cat <<EOF > /mnt/etc/systemd/network/20-wired.network
+[Match]
+Name=eth0
+
+[Network]
+Address=${IP4}
+Gateway=${GW4}
+DNS=1.1.1.1
+DNS=8.8.8.8
+EOF
+
+if [[ -n "${IP6:-}" ]]; then
+cat <<EOF >> /mnt/etc/systemd/network/20-wired.network
+
+Address=${IP6}
+Gateway=${GW6}
+DNS=2606:4700:4700::1111
+DNS=2001:4860:4860::8888
+EOF
+fi
+
+mkdir -p /mnt/etc/cloud/cloud.cfg.d
+echo 'network: {config: disabled}' > /mnt/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+
+umount /mnt
+sync
+echo "完成。关闭救援系统，切回系统盘启动即可。"
+```
+
+说明：
+
+- 脚本从救援系统的默认路由接口读取 IP 和网关，dd 后写入 `systemd-networkd` 配置文件
+- 写入 `99-disable-network-config.cfg` 阻止 cloud-init 首次启动时覆盖手动网络配置
+- 如果 VPS 的 IP 不在救援系统的网卡上（例如需要手动指定），可直接修改脚本顶部的 `IP` 和 `GW` 变量
+
 ### 手动引导：通过 GRUB 2 控制台启动（按 C）
 
 如果 `dd` 后宿主 GRUB 菜单无法自动启动，可在 GRUB 2 菜单界面按 **`c`** 进入命令行，逐条输入以下命令手动引导：
@@ -128,10 +198,11 @@ boot
 
 ### 进入系统后：重建引导配置
 
-手动引导进入系统后，重写 `/boot/grub/grub.cfg`：
+手动引导进入系统后，重写 `/boot/grub2/grub.cfg`：
 
 ```bash
-cat <<'EOF' > /boot/grub/grub.cfg
+mkdir -p /boot/grub2
+cat <<'EOF' > /boot/grub2/grub.cfg
 set root=(hd0,msdos1)
 set timeout=1
 set default=0
@@ -150,7 +221,7 @@ menuentry "Arch Linux (fallback)" {
     initrd /boot/initramfs-linux-fallback.img
 }
 EOF
-ln -sf grub /boot/grub2
+ln -sfn grub2 /boot/grub
 sync
 reboot
 ```
@@ -163,8 +234,8 @@ reboot
 
 ```bash
 mount /dev/vda1 /mnt  # 若不存在，改用: mount /dev/vda /mnt
-mkdir -p /mnt/boot/grub
-cat <<'EOF' > /mnt/boot/grub/grub.cfg
+mkdir -p /mnt/boot/grub2
+cat <<'EOF' > /mnt/boot/grub2/grub.cfg
 set root=(hd0,msdos1)
 set timeout=1
 set default=0
@@ -183,7 +254,7 @@ menuentry "Arch Linux (fallback)" {
     initrd /boot/initramfs-linux-fallback.img
 }
 EOF
-ln -sf grub /mnt/boot/grub2
+ln -sfn grub2 /mnt/boot/grub
 umount /mnt
 sync
 reboot
