@@ -5,7 +5,7 @@
 # errexit: "Exit immediately if [...] command exits with a non-zero status."
 set -o nounset -o errexit
 shopt -s extglob
-readonly DEFAULT_DISK_SIZE="16G"
+readonly DEFAULT_DISK_SIZE="5G"
 readonly IMAGE="image.img"
 # shellcheck disable=SC2016
 readonly MIRROR='https://fastly.mirror.pkgbuild.com/$repo/os/$arch'
@@ -43,23 +43,15 @@ function cleanup() {
 }
 trap cleanup EXIT
 
-# Create the disk image as a "superfloppy" — ext4 starting at byte 0,
-# no partition table during build.  After unmount we inject a fake MBR
-# so CloudCone host GRUB can address it as (hd0,msdos1).
-#
-# Why: host GRUB 2.02's ext2 module can traverse ext4 directories when
-# the filesystem starts at byte 0 (proven with superfloppy), but garbles
-# directory listings when the filesystem sits behind a real 1 MiB partition
-# offset.  The fake-MBR trick sets partition 1 LBA-start = 0, so GRUB
-# resolves (hd0,msdos1) to byte 0 — identical to (hd0).
+# Create disk image with standard MBR partition layout.
+# Partition 1 starts at sector 2048 (1 MiB offset) leaving room for
+# GRUB boot.img (MBR) + core.img (post-MBR gap, sectors 1-2047).
 function setup_disk() {
   truncate -s "${DEFAULT_DISK_SIZE}" "${IMAGE}"
-
-  LOOPDEV=$(losetup --find --show "${IMAGE}")
-  # Use Debian 11 mke2fs.conf so the ext4 filesystem matches what CloudCone's
-  # host GRUB can read (no metadata_csum_seed / orphan_file incompat features).
-  MKE2FS_CONFIG="${ORIG_PWD}/debian11-mke2fs.conf" mkfs.ext4 -F "${LOOPDEV}"
-  mount "${LOOPDEV}" "${MOUNT}"
+  echo ',,L,*' | sfdisk "${IMAGE}"
+  LOOPDEV=$(losetup --find --show --partscan "${IMAGE}")
+  mkfs.ext4 -F "${LOOPDEV}p1"
+  mount "${LOOPDEV}p1" "${MOUNT}"
 }
 
 # Install Arch Linux to the filesystem (bootstrap)
@@ -82,7 +74,7 @@ EOF
   echo "KEYMAP=us" >"${MOUNT}/etc/vconsole.conf"
 
   # We use the hosts package cache
-  pacstrap -c -C pacman.conf -K -M "${MOUNT}" base linux grub openssh sudo e2fsprogs qemu-guest-agent
+  pacstrap -c -C pacman.conf -K -M "${MOUNT}" base linux grub openssh sudo e2fsprogs cloud-guest-utils qemu-guest-agent
   # Workaround for https://gitlab.archlinux.org/archlinux/arch-install-scripts/-/issues/56
   gpgconf --homedir "${MOUNT}/etc/pacman.d/gnupg" --kill gpg-agent
   cp mirrorlist "${MOUNT}/etc/pacman.d/"
@@ -106,10 +98,10 @@ function image_cleanup() {
   fstrim --verbose "${MOUNT}"
 }
 
-# Mount image helper (loop device + mount) — superfloppy, no partitions
+# Mount image helper (loop device with partition scan + mount partition 1)
 function mount_image() {
-  LOOPDEV=$(losetup --find --show "${1:-${IMAGE}}")
-  mount "${LOOPDEV}" "${MOUNT}"
+  LOOPDEV=$(losetup --find --show --partscan "${1:-${IMAGE}}")
+  mount "${LOOPDEV}p1" "${MOUNT}"
   # Setup bind mount to package cache
   mount --bind "/var/cache/pacman/pkg" "${MOUNT}/var/cache/pacman/pkg"
 }
@@ -119,48 +111,6 @@ function unmount_image() {
   umount --recursive "${MOUNT}"
   losetup -d "${LOOPDEV}"
   LOOPDEV=""
-}
-
-# Inject a minimal MBR partition table into a superfloppy image.
-# Partition 1 starts at LBA 0 and spans the entire image.
-#
-# This lets CloudCone host GRUB address the disk as (hd0,msdos1) while
-# the ext4 filesystem still begins at byte 0 (where GRUB 2.02 can read
-# it without garbling directory listings).
-#
-# Safety: ext4's "boot block" (bytes 0-1023) is reserved / unused by the
-# filesystem.  The superblock lives at byte 1024.  Writing a 66-byte MBR
-# structure at offsets 446-511 is harmless.
-#
-# On the VPS the Linux kernel detects the MBR and exposes /dev/vda1,
-# so root=/dev/vda1 and fstab entries work as expected.
-function inject_mbr() {
-  local image="${1}"
-  local total_bytes total_sectors
-  total_bytes=$(stat -c %s "${image}")
-  total_sectors=$(( total_bytes / 512 ))
-
-  # Little-endian bytes of total_sectors (4 bytes)
-  local s0 s1 s2 s3
-  s0=$(printf '%02x' $(( total_sectors & 0xFF )))
-  s1=$(printf '%02x' $(( (total_sectors >> 8)  & 0xFF )))
-  s2=$(printf '%02x' $(( (total_sectors >> 16) & 0xFF )))
-  s3=$(printf '%02x' $(( (total_sectors >> 24) & 0xFF )))
-
-  # 16-byte partition entry at offset 446:
-  #   80           = bootable
-  #   00 01 00     = CHS start (head 0, sector 1, cylinder 0)
-  #   83           = Linux partition type
-  #   FE FF FF     = CHS end   (LBA-mode max)
-  #   00 00 00 00  = LBA start = 0
-  #   s0 s1 s2 s3  = LBA size  = total_sectors
-  printf '\x80\x00\x01\x00\x83\xfe\xff\xff\x00\x00\x00\x00\x'"${s0}"'\x'"${s1}"'\x'"${s2}"'\x'"${s3}" | \
-    dd of="${image}" bs=1 seek=446 conv=notrunc status=none
-
-  # MBR boot signature
-  printf '\x55\xaa' | dd of="${image}" bs=1 seek=510 conv=notrunc status=none
-
-  echo "MBR injected: partition 1 @ LBA 0, ${total_sectors} sectors ($(( total_bytes / 1024 / 1024 )) MiB)"
 }
 
 # Compute SHA256, adjust owner to $SUDO_UID:$SUDO_UID and move to output/
@@ -204,7 +154,9 @@ function create_image() {
   fi
   mount_image "${tmp_image}"
   if [ -n "${DISK_SIZE}" ]; then
-    resize2fs "${LOOPDEV}"
+    # Grow partition 1 to fill the resized image, then resize the filesystem.
+    growpart "${LOOPDEV}" 1
+    resize2fs "${LOOPDEV}p1"
   fi
 
   if [ 0 -lt "${#PACKAGES[@]}" ]; then
@@ -216,7 +168,6 @@ function create_image() {
   "${2}"
   image_cleanup
   unmount_image
-  inject_mbr "${tmp_image}"
   "${3}" "${tmp_image}" "${1}"
   mv_to_output "${1}"
 }

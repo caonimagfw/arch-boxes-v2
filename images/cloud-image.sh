@@ -8,7 +8,7 @@ PACKAGES=(cloud-init cloud-guest-utils)
 SERVICES=(cloud-init-main.service cloud-init-local.service cloud-init-network.service cloud-config.service cloud-final.service)
 
 function pre() {
-# Disable growpart/resizefs since we don't want automatic expansion
+# Disable growpart/resizefs — handled by our oneshot expand-disk.service
   mkdir -p "${MOUNT}/etc/cloud/cloud.cfg.d"
   cat <<'EOF' >"${MOUNT}/etc/cloud/cloud.cfg.d/99-disable-growpart.cfg"
 growpart:
@@ -21,9 +21,8 @@ EOF
   echo 'GRUB_TERMINAL="serial console"' >>"${MOUNT}/etc/default/grub"
   echo 'GRUB_SERIAL_COMMAND="serial --speed=115200"' >>"${MOUNT}/etc/default/grub"
 
-  # GRUB 2 config with serial console for CloudCone VNC/serial.
-  cat <<'GRUBCFG' >"${MOUNT}/boot/grub2/grub.cfg"
-set root=(hd0,msdos1)
+  # GRUB 2 config with serial console for VNC/serial.
+  cat <<'GRUBCFG' >"${MOUNT}/boot/grub/grub.cfg"
 set timeout=1
 set default=0
 
@@ -41,17 +40,6 @@ menuentry "Arch Linux (fallback)" {
     initrd /boot/initramfs-linux-fallback.img
 }
 GRUBCFG
-
-  # Grub Legacy config with serial console.
-  cat <<'LEGACYCFG' >"${MOUNT}/boot/grub2/grub.conf"
-default 0
-timeout 1
-
-title Arch Linux
-root (hd0,0)
-kernel /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0 console=tty0 console=ttyS0,115200
-initrd /boot/initramfs-linux.img
-LEGACYCFG
 }
 
 function post() {

@@ -54,6 +54,7 @@ systemctl enable systemd-resolved
 systemctl enable systemd-timesyncd
 systemctl enable systemd-time-wait-sync
 systemctl enable pacman-init.service
+systemctl enable expand-disk.service
 EOF
 
   # Default access policy for cloud builds: keep root and allow password login.
@@ -75,14 +76,10 @@ chpasswd:
   expire: false
 EOF
 
-  # GRUB — Host GRUB is CentOS/RHEL 8 (GRUB 2.02-81.el8).
-  # It reads config via 'configfile', NOT MBR chainload:
-  #   Grub 2:    set root=(hd0,msdos1); configfile /boot/grub2/grub.cfg
-  #   Legacy:    set root=(hd0,msdos1); legacy_configfile /boot/grub/grub.conf
-  #
-  # No grub-install needed. We write static configs with correct device paths.
-  # /boot/grub2/ is the real directory (matches host configfile path).
-  # /boot/grub → grub2 symlink for Arch grub package compatibility.
+  # GRUB — Standard BIOS/MBR self-boot.
+  # grub-install writes boot.img into MBR and core.img into the post-MBR gap.
+  # We then write a static grub.cfg. /etc/default/grub is configured so that
+  # 'grub-mkconfig' on the live VPS produces correct output.
 
   # Configure /etc/default/grub for future 'grub-mkconfig' on the live VPS.
   sed -i 's/^GRUB_TIMEOUT=.*$/GRUB_TIMEOUT=1/' "${MOUNT}/etc/default/grub"
@@ -91,13 +88,12 @@ EOF
   echo 'GRUB_DISABLE_LINUX_UUID=true' >>"${MOUNT}/etc/default/grub"
   echo 'GRUB_DISABLE_LINUX_PARTUUID=true' >>"${MOUNT}/etc/default/grub"
 
-  # /boot/grub2/ is the real directory; /boot/grub → grub2 symlink.
-  mkdir -p "${MOUNT}/boot/grub2"
-  ln -sfn grub2 "${MOUNT}/boot/grub"
+  # Install GRUB to MBR + post-MBR gap of the loop device.
+  # arch-chroot bind-mounts /dev, so the loop device is visible inside chroot.
+  arch-chroot "${MOUNT}" grub-install --target=i386-pc "${LOOPDEV}"
 
-  # GRUB 2 config — cloud-image.sh will overwrite with serial console.
-  cat <<'GRUBCFG' >"${MOUNT}/boot/grub2/grub.cfg"
-set root=(hd0,msdos1)
+  # Static GRUB 2 config — cloud-image.sh will overwrite with serial console.
+  cat <<'GRUBCFG' >"${MOUNT}/boot/grub/grub.cfg"
 set timeout=1
 set default=0
 
@@ -112,14 +108,28 @@ menuentry "Arch Linux (fallback)" {
 }
 GRUBCFG
 
-  # Grub Legacy config for host's fallback "Grub Legacy" option.
-  cat <<'LEGACYCFG' >"${MOUNT}/boot/grub2/grub.conf"
-default 0
-timeout 1
+  # Oneshot disk expansion: runs once on first boot, creates marker regardless
+  # of success/failure so it never runs again.
+  cat <<'SCRIPT' >"${MOUNT}/usr/local/bin/expand-disk"
+#!/bin/bash
+growpart /dev/vda 1 || true
+resize2fs /dev/vda1 || true
+touch /var/lib/disk-expanded
+SCRIPT
+  chmod 0755 "${MOUNT}/usr/local/bin/expand-disk"
 
-title Arch Linux
-root (hd0,0)
-kernel /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0
-initrd /boot/initramfs-linux.img
-LEGACYCFG
+  cat <<EOF >"${MOUNT}/etc/systemd/system/expand-disk.service"
+[Unit]
+Description=Expand root partition and filesystem (oneshot)
+After=local-fs.target
+ConditionPathExists=!/var/lib/disk-expanded
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+ExecStart=/usr/local/bin/expand-disk
+
+[Install]
+WantedBy=multi-user.target
+EOF
 }
