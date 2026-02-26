@@ -119,6 +119,7 @@ EOF
 
   # Static GRUB 2 config — cloud-image.sh will overwrite with serial console.
   cat <<'GRUBCFG' >"${MOUNT}/boot/grub/grub.cfg"
+set root=(hd0,msdos1)
 set timeout=1
 set default=0
 
