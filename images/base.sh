@@ -45,6 +45,31 @@ Server = https://fastly.mirror.pkgbuild.com/$repo/os/$arch
 Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch
 EOF
 
+  # Oneshot disk expansion: runs once on first boot, creates marker regardless
+  # of success/failure so it never runs again.
+  cat <<'SCRIPT' >"${MOUNT}/usr/local/bin/expand-disk"
+#!/bin/bash
+growpart /dev/vda 1 || true
+resize2fs /dev/vda1 || true
+touch /var/lib/disk-expanded
+SCRIPT
+  chmod 0755 "${MOUNT}/usr/local/bin/expand-disk"
+
+  cat <<EOF >"${MOUNT}/etc/systemd/system/expand-disk.service"
+[Unit]
+Description=Expand root partition and filesystem (oneshot)
+After=local-fs.target
+ConditionPathExists=!/var/lib/disk-expanded
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+ExecStart=/usr/local/bin/expand-disk
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
   # enabling important services
   arch-chroot "${MOUNT}" /bin/bash -e <<EOF
 source /etc/profile
@@ -108,28 +133,4 @@ menuentry "Arch Linux (fallback)" {
 }
 GRUBCFG
 
-  # Oneshot disk expansion: runs once on first boot, creates marker regardless
-  # of success/failure so it never runs again.
-  cat <<'SCRIPT' >"${MOUNT}/usr/local/bin/expand-disk"
-#!/bin/bash
-growpart /dev/vda 1 || true
-resize2fs /dev/vda1 || true
-touch /var/lib/disk-expanded
-SCRIPT
-  chmod 0755 "${MOUNT}/usr/local/bin/expand-disk"
-
-  cat <<EOF >"${MOUNT}/etc/systemd/system/expand-disk.service"
-[Unit]
-Description=Expand root partition and filesystem (oneshot)
-After=local-fs.target
-ConditionPathExists=!/var/lib/disk-expanded
-
-[Service]
-Type=oneshot
-RemainAfterExit=no
-ExecStart=/usr/local/bin/expand-disk
-
-[Install]
-WantedBy=multi-user.target
-EOF
 }
