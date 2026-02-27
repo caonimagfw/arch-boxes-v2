@@ -58,6 +58,8 @@ arch-boxes 提供面向 `dd` 安装的 Arch Linux cloud raw 镜像构建方案�
 - `Arch-Linux-x86_64-cloudimg-<version>.raw.zst.SHA256`
 - `Arch-Linux-x86_64-cloudimg-<version>.tar.zst`
 - `Arch-Linux-x86_64-cloudimg-<version>.tar.zst.SHA256`
+- `Arch-Linux-x86_64-cloudimg-<version>.raw.gz`（用于 leitbogioro 等 dd 脚本）
+- `Arch-Linux-x86_64-cloudimg-<version>.raw.gz.SHA256`
 
 工作流会创建 `v<version>` 标签的 GitHub Release，并上传以上文件。
 
@@ -194,9 +196,34 @@ EOF
 
   echo "Config + tools saved to tmpfs ($WORK)"
 
-  # ---- 3. DD 前释放内存 ----
+  # ---- 3. DD 前释放内存并冻结旧文件系统 ----
   swapoff -a 2>/dev/null || true
   systemctl stop cron rsyslog snapd unattended-upgrades 2>/dev/null || true
+  
+  echo "Syncing data to disk..."
+  sync
+
+  # 确保 sysrq 开启，防止部分系统（如 Debian 12）默认禁用导致无响应
+  echo 1 > /proc/sys/kernel/sysrq 2>/dev/null || true
+
+  # 【关键】SysRq-U 强制所有挂载点刷写脏页并 remount read-only。
+  # 必须轮询等待变 ro，否则 dd 覆盖磁盘后，旧系统遗留的脏页回写会破坏新镜像。
+  echo u > /proc/sysrq-trigger
+  echo "Waiting for filesystems to become read-only..."
+  for i in {1..30}; do
+    if ! grep -E '^/dev/.* rw,' /proc/mounts >/dev/null 2>&1; then
+      echo "All physical filesystems are read-only."
+      break
+    fi
+    sleep 1
+    if [[ $i -eq 30 ]]; then
+      echo "ERROR: Timeout waiting for ro. Aborting to prevent corruption."
+      exit 1
+    fi
+  done
+
+  # 丢弃所有底层块设备的页缓存，防止 sysrq-s 时写回幽灵脏数据
+  blockdev --flushbufs "${DISK}" 2>/dev/null || true
   echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
 
   echo "Starting dd..."
@@ -209,10 +236,7 @@ EOF
   set -o pipefail
   if [[ $DD_EXIT -ne 0 ]]; then echo "ERROR: dd failed (exit $DD_EXIT)"; exit 1; fi
 
-  # ---- 5. 清除内核页缓存 ----
-  echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
-
-  # ---- 6. 用 tmpfs 中的工具写入配置 ----
+  # ---- 5. 用 tmpfs 中的工具写入配置 ----
   # 新镜像的 ext4 从 sector 2048 (1 MiB) 开始，不能直接 debugfs /dev/vda。
   # 也不能用 /dev/vda1 — 内核分区缓存可能是旧系统的，存在脏数据风险。
   # 解法：losetup --offset 创建干净的 loop 设备，指向新分区的精确偏移。
@@ -236,12 +260,30 @@ EOF
     "$LD_SO" --library-path "$WORK/lib" "$WORK/bin/losetup" -d "$LOOP_NEW" 2>/dev/null || true
   fi
 
-  echo "Network config written. Rebooting..."
+  echo "Network config written. Rebooting via SysRq S-U-B..."
+
+  # 【重启策略】纯内核态 SysRq S-U-B 安全重启序列。
+  #
+  # dd 覆盖磁盘后，所有用户态命令（sync、reboot -f 等）都会因底层 ext4
+  # 结构已被新镜像取代而 Segfault / "Structure needs cleaning"。
+  # 因此只能使用 echo > /proc/sysrq-trigger（内核内联处理）和
+  # Bash 内置的 read -t（不触碰磁盘）来完成重启。
+  #
+  # 在 KVM/QEMU 虚拟化环境中，dd conv=fsync 虽然在 Guest 层面完成了
+  # FLUSH，但宿主机（Host）的存储后端（如网络磁盘、ceph、LVM）可能
+  # 仍有数据在 Host 页缓存中未落盘。SysRq-S 触发内核级 Emergency Sync，
+  # 向 virtio 驱动发送额外的 FLUSH/FUA 指令；长等待（共 10 秒）给
+  # 宿主机存储后端充足的物理落盘时间。
+
+  # S = Emergency Sync：刷写所有内核脏缓冲区，向虚拟磁盘发送 FLUSH
   echo s > /proc/sysrq-trigger
+  read -t 5 < /dev/udp/127.0.0.1/65535 2>/dev/null || true
 
-  # 使用 Bash 内部的方式实现 sleep 2 秒，避免调用 external `sleep` 导致崩溃
-  read -t 2 < /dev/udp/127.0.0.1/65535 2>/dev/null || true
+  # U = Emergency Remount R/O：触发额外的设备级刷盘信号
+  echo u > /proc/sysrq-trigger
+  read -t 5 < /dev/udp/127.0.0.1/65535 2>/dev/null || true
 
+  # B = 立即硬重启
   echo b > /proc/sysrq-trigger
 }
 
@@ -259,10 +301,89 @@ main "$@"
 - **`oflag=direct`**：dd 写出走 Direct I/O 绕过页缓存，减少对内存中其他缓存页（如 bash 自身）的冲击
 - **`set +o pipefail` + `PIPESTATUS[2]`**：dd 覆盖磁盘后 `wget` 清理阶段可能因共享库丢失而 segfault（退出码 139），`pipefail` 会把这个无害错误当作管道失败导致脚本中断。临时关闭 `pipefail`，只检查 `dd` 的退出码（管道第 3 个命令）
 - **dd 前释放内存**：停止非关键服务 + 释放页缓存，为 dd 管道（wget + zstd）腾出最大可用内存
-- **`echo s` + `echo b` > `/proc/sysrq-trigger`**：SysRq-S 触发 emergency sync 确保 debugfs 写入的数据落盘，`sleep 2` 等待完成后 SysRq-B 立即重启，全程不依赖任何用户态二进制
+- **SysRq-U（remount read-only）+ 轮询等待**：dd 前强制所有挂载点刷写脏页并 remount read-only。由于 SysRq-U 是异步执行的，脚本会轮询 `/proc/mounts` 阻塞等待，直到所有的文件系统真正变为 `ro` 后才允许执行 `dd`。这一步确保旧系统不再产生脏页。
+- **`blockdev --flushbufs`**：清空底层块设备的幽灵缓存，彻底切断旧系统与磁盘的联系
+- **dd 后不执行 `drop_caches`**：dd 覆盖磁盘后，旧系统的共享库/二进制缓存是唯一让后续 debugfs（通过 tmpfs 中的 ld.so）能运行的保障。如果清掉这些缓存，内核在加载任何外部命令时都会尝试从已被覆盖的磁盘上读取，导致 `Segmentation fault` 或 `Structure needs cleaning`
 - **`debugfs -w`**：绕过 VFS mount 直接操作 ext4 结构，不受内核旧根挂载的 exclusive claim 限制
+- **SysRq S-U-B 安全重启序列**：dd 后整个用户态已是"行尸走肉"——磁盘上的二进制已被新镜像取代，任何用户态命令（`sync`、`reboot -f`）都会 Segfault。因此只能使用纯内核态的 SysRq 触发器来重启。`S`（Emergency Sync）向 virtio 虚拟磁盘控制器发送 FLUSH 指令，通知宿主机（Host）将页缓存中的数据持久化到物理存储；`U`（Emergency Remount R/O）触发额外的设备级刷盘信号；中间共等待 10 秒给宿主机存储后端（可能是网络磁盘、Ceph、LVM）充足的物理落盘时间；最后 `B` 立即硬重启。所有等待都使用 Bash 内置的 `read -t`（不触碰磁盘）
 - 镜像已预建 `/etc/systemd/network/` 和 `/etc/cloud/cloud.cfg.d/` 目录，`debugfs write` 可直接写入
 - 如果 VPS 的 IP 不在当前网卡上（例如需要手动指定），可直接在脚本顶部覆盖 `IP4`、`GW4` 变量
+- **兜底方案**：如果脚本自动重启后仍然出现 fsck 失败，可从 VPS 控制面板（如 CloudCone）执行 **Power Off → Power On**（物理级电源循环），强制宿主机重置虚拟磁盘状态。如果仍不行，进入救援模式执行 `e2fsck -yf /dev/vda1` 修复文件系统后重启
+
+### DD 操作（leitbogioro 一键重装脚本）
+
+使用 [leitbogioro/Tools](https://github.com/leitbogioro/Tools) 的 `InstallNET.sh` 脚本 dd 自定义镜像。该脚本先将一个小型 Debian 12 内核加载到内存，重启后从内存中的系统执行 dd，磁盘处于空闲状态，不存在 live dd 的页缓存冲突问题。
+
+> **前提**：需要 VNC/控制台访问能力（dd 后需从控制台配置网络）。镜像必须使用 `.raw.gz` 格式（脚本不支持 zstd）。
+
+**1. SSH 登录当前系统，下载脚本：**
+
+```bash
+apt update -y && apt install wget -y
+wget --no-check-certificate -qO InstallNET.sh 'https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh' && chmod a+x InstallNET.sh
+```
+
+**2. 执行 dd（静态网络）：**
+
+```bash
+bash InstallNET.sh -dd 'https://github.com/OWNER/REPO/releases/download/vX.Y.Z/Arch-Linux-x86_64-cloudimg-X.Y.Z.raw.gz' \
+  --network "static" \
+  --ip-addr 'IPv4地址' \
+  --ip-mask '掩码前缀(如24)' \
+  --ip-gate 'IPv4网关' \
+  --ip-dns '1.1.1.1'
+```
+
+如有 IPv6，追加参数：
+
+```bash
+  --ip6-addr 'IPv6地址' \
+  --ip6-mask 'IPv6前缀长度' \
+  --ip6-gate 'IPv6网关'
+```
+
+> `--network "static"` 和 `--ip-*` 参数用于中间系统（内存中的 Debian 12）联网下载镜像，不会注入到目标镜像中。
+
+**3. 等待自动重启完成 dd**
+
+脚本自动修改 GRUB 并重启，从内存中的 Debian 12 下载并 dd 镜像，全程无需干预。
+
+**4. 从 VNC 配置网络**
+
+dd 完成后系统自动重启进入新镜像。从 VPS 控制面板打开 VNC，使用默认凭据登录（`root` / `Passw0rd`），手动写入网络配置：
+
+```bash
+cat > /etc/systemd/network/20-wired.network <<EOF
+[Match]
+Name=eth0
+
+[Network]
+Address=你的IPv4/掩码
+Gateway=你的网关
+DNS=1.1.1.1
+DNS=8.8.8.8
+EOF
+```
+
+如有 IPv6：
+
+```bash
+cat >> /etc/systemd/network/20-wired.network <<EOF
+
+Address=你的IPv6/前缀长度
+Gateway=你的IPv6网关
+DNS=2606:4700:4700::1111
+EOF
+```
+
+禁用 cloud-init 网络覆盖并重启网络：
+
+```bash
+echo 'network: {config: disabled}' > /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+systemctl restart systemd-networkd
+```
+
+验证连通后即可切回 SSH。
 
 ### 手动引导：通过 GRUB 控制台启动（按 C）
 
@@ -272,7 +393,7 @@ main "$@"
 insmod part_msdos
 insmod ext2
 set root=(hd0,msdos1)
-linux /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0 console=tty0 console=ttyS0,115200
+linux /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0 console=tty0
 initrd /boot/initramfs-linux.img
 boot
 ```
@@ -291,20 +412,17 @@ reboot
 
 ```bash
 cat <<'EOF' > /boot/grub/grub.cfg
+set root=(hd0,msdos1)
 set timeout=1
 set default=0
 
-serial --speed=115200
-terminal_input serial console
-terminal_output serial console
-
 menuentry "Arch Linux" {
-    linux /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0 console=tty0 console=ttyS0,115200
+    linux /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0 console=tty0
     initrd /boot/initramfs-linux.img
 }
 
 menuentry "Arch Linux (fallback)" {
-    linux /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0 console=tty0 console=ttyS0,115200
+    linux /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0 console=tty0
     initrd /boot/initramfs-linux-fallback.img
 }
 EOF
@@ -332,20 +450,17 @@ reboot
 ```bash
 mount /dev/vda1 /mnt
 cat <<'EOF' > /mnt/boot/grub/grub.cfg
+set root=(hd0,msdos1)
 set timeout=1
 set default=0
 
-serial --speed=115200
-terminal_input serial console
-terminal_output serial console
-
 menuentry "Arch Linux" {
-    linux /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0 console=tty0 console=ttyS0,115200
+    linux /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0 console=tty0
     initrd /boot/initramfs-linux.img
 }
 
 menuentry "Arch Linux (fallback)" {
-    linux /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0 console=tty0 console=ttyS0,115200
+    linux /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0 console=tty0
     initrd /boot/initramfs-linux-fallback.img
 }
 EOF
@@ -369,7 +484,7 @@ resize2fs /dev/vda1
 
 - 工作流运行于 `ubuntu-latest`，并使用特权 Docker 容器。若预检失败，可稍后重试或改用自托管 Linux Runner。
 - `version` 会映射为发布标签 `v<version>`。除非 `overwrite_release=true`，否则请保持版本唯一。
-- 发布产物为 `raw.zst` 与 `tar.zst`，每个产物都启用了体积阈值保护，超限会提前失败。
+- 发布产物为 `raw.zst`、`tar.zst` 和 `raw.gz`，每个产物都启用了体积阈值保护，超限会提前失败。
 - 若发布已存在且未开启覆盖，请更换版本号或启用覆盖后重试。
 
 # 发布签名

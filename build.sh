@@ -133,6 +133,11 @@ function mv_to_output() {
     artifacts+=("${tar_zst}" "${tar_zst}.SHA256")
   fi
 
+  if [ -f "${1}.gz" ]; then
+    sha256sum "${1}.gz" >"${1}.gz.SHA256"
+    artifacts+=("${1}.gz" "${1}.gz.SHA256")
+  fi
+
   if [ -n "${SUDO_UID:-}" ]; then
     chown "${SUDO_UID}:${SUDO_GID}" "${artifacts[@]}"
   fi

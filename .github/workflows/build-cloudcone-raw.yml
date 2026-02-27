@@ -95,11 +95,13 @@ jobs:
           ls -lah output
           raw_zst_file="$(ls output/*cloudimg*.raw.zst)"
           tar_zst_file="$(ls output/*cloudimg*.tar.zst)"
+          raw_gz_file="$(ls output/*cloudimg*.raw.gz)"
 
           sha256sum "${raw_zst_file}" > "${raw_zst_file}.SHA256"
           sha256sum "${tar_zst_file}" > "${tar_zst_file}.SHA256"
+          sha256sum "${raw_gz_file}" > "${raw_gz_file}.SHA256"
 
-          for artifact in "${raw_zst_file}" "${tar_zst_file}"; do
+          for artifact in "${raw_zst_file}" "${tar_zst_file}" "${raw_gz_file}"; do
             artifact_size="$(stat -c '%s' "${artifact}")"
             echo "Artifact: ${artifact}"
             echo "Size bytes: ${artifact_size}"
@@ -114,7 +116,7 @@ jobs:
       - name: Print SHA256 for release audit
         run: |
           set -euo pipefail
-          sha256sum output/*cloudimg*.raw.zst output/*cloudimg*.tar.zst
+          sha256sum output/*cloudimg*.raw.zst output/*cloudimg*.tar.zst output/*cloudimg*.raw.gz
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
@@ -127,4 +129,6 @@ jobs:
             output/*cloudimg*.raw.zst.SHA256
             output/*cloudimg*.tar.zst
             output/*cloudimg*.tar.zst.SHA256
+            output/*cloudimg*.raw.gz
+            output/*cloudimg*.raw.gz.SHA256
           fail_on_unmatched_files: true

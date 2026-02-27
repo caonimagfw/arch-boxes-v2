@@ -45,4 +45,6 @@ function post() {
 
   tar -cf "${tar_image}" "$(basename "${raw_image}")"
   zstd -T0 -19 --rm "${tar_image}" -o "${tar_image}.zst"
+
+  gzip -1 -c "${raw_image}" > "${raw_image}.gz"
 }
