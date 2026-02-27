@@ -16,28 +16,19 @@ growpart:
 resize_rootfs: false
 EOF
 
-  # Configure /etc/default/grub for future 'grub-mkconfig' on the live VPS.
-  sed -Ei 's/^(GRUB_CMDLINE_LINUX_DEFAULT=.*)"$/\1 console=tty0 console=ttyS0,115200"/' "${MOUNT}/etc/default/grub"
-  echo 'GRUB_TERMINAL="serial console"' >>"${MOUNT}/etc/default/grub"
-  echo 'GRUB_SERIAL_COMMAND="serial --speed=115200"' >>"${MOUNT}/etc/default/grub"
-
-  # GRUB 2 config with serial console for VNC/serial.
+  # GRUB config — console=tty0 only (noVNC visible).
   cat <<'GRUBCFG' >"${MOUNT}/boot/grub/grub.cfg"
 set root=(hd0,msdos1)
 set timeout=1
 set default=0
 
-serial --speed=115200
-terminal_input serial console
-terminal_output serial console
-
 menuentry "Arch Linux" {
-    linux /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0 console=tty0 console=ttyS0,115200
+    linux /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0 console=tty0
     initrd /boot/initramfs-linux.img
 }
 
 menuentry "Arch Linux (fallback)" {
-    linux /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0 console=tty0 console=ttyS0,115200
+    linux /boot/vmlinuz-linux root=/dev/vda1 rw net.ifnames=0 console=tty0
     initrd /boot/initramfs-linux-fallback.img
 }
 GRUBCFG

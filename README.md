@@ -126,7 +126,7 @@ main() {
     fi
   done
 
-  DD_URL="https://github.com/OWNER/REPO/releases/download/vX.Y.Z/Arch-Linux-x86_64-cloudimg-X.Y.Z.raw.zst"
+  DD_URL="https://github.com/caonimagfw/arch-boxes-v2/releases/download/v6.18.9-MBR-V2/Arch-Linux-x86_64-cloudimg-6.18.9-MBR-V2.raw.zst"
   DISK="/dev/vda"
   # 新镜像分区 1 从 sector 2048 开始 (1 MiB = 1048576 字节)
   PART_OFFSET=1048576
