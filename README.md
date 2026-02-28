@@ -132,6 +132,16 @@ echo b > /proc/sysrq-trigger
 3. 在面板切回 VPS 系统盘启动
 4. 正常开机
 
+```bash
+rm -rf /etc/pacman.d/gnupg
+pacman-key --init
+pacman-key --populate archlinux
+pacman -Syu
+
+```
+
+
+
 ### 手动引导：通过 GRUB 2 控制台启动（按 C）
 
 如果 `dd` 后宿主 GRUB 菜单无法自动启动，可在 GRUB 2 菜单界面按 **`c`** 进入命令行，逐条输入以下命令手动引导：
