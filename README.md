@@ -121,6 +121,7 @@ sync
 ```bash
 wget -O- https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.tar.zst | zstd -d | tar -xO -f - --wildcards '*cloudimg*.raw' | dd of=/dev/vda bs=1M status=progress conv=fsync
 sync
+echo b > /proc/sysrq-trigger
 ```
 
 `dd` 完成后：
