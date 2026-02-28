@@ -114,6 +114,7 @@ apt-get update -qq && apt-get install -y zstd e2fsprogs util-linux
 ```bash
 wget -O- https://github.com/caonimagfw/arch-boxes-v2/releases/download/v6.18.9-v24.2/Arch-Linux-x86_64-cloudimg-6.18.9-v24.2.raw.zst | zstd -d | dd of=/dev/vda bs=4M status=progress conv=fsync
 sync
+echo b > /proc/sysrq-trigger
 ```
 
 方式 B（`tar.zst`）：
