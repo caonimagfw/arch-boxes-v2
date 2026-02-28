@@ -132,12 +132,10 @@ echo b > /proc/sysrq-trigger
 3. 在面板切回 VPS 系统盘启动
 4. 正常开机
 
+### Keystring
 ```bash
-rm -rf /etc/pacman.d/gnupg
 pacman-key --init
 pacman-key --populate archlinux
-pacman -Syu
-
 ```
 
 
