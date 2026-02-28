@@ -105,6 +105,10 @@ umount -R /dev/vda* 2>/dev/null || true
 
 以下两种方式二选一。
 
+```bash
+apt-get update -qq && apt-get install -y zstd e2fsprogs util-linux
+```
+
 方式 A（`raw.zst`）：
 
 ```bash
