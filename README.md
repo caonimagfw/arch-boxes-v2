@@ -112,7 +112,7 @@ apt-get update -qq && apt-get install -y zstd e2fsprogs util-linux
 方式 A（`raw.zst`）：
 
 ```bash
-wget -O- https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.raw.zst | zstd -d | dd of=/dev/vda bs=1M status=progress conv=fsync
+wget -O- https://github.com/caonimagfw/arch-boxes-v2/releases/download/v6.18.9-v24.2/Arch-Linux-x86_64-cloudimg-6.18.9-v24.2.raw.zst | zstd -d | dd of=/dev/vda bs=4M status=progress conv=fsync
 sync
 ```
 
